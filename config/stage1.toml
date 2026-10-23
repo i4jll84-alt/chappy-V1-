@@ -1,0 +1,7 @@
+stage = 1
+plan = "standard"
+plan_evidence = "user_reported_2026-10-23"
+data_root = "data/jquants"
+availability_rule = "observed_at_plus_1_second_v1"
+single_writer = true
+live_trading = false
