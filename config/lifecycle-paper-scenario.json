@@ -1,0 +1,492 @@
+{
+  "settings": {
+    "mode": "paper",
+    "real_execution_enabled": false,
+    "first_day": "2026-10-23",
+    "calendar": {
+      "source": "fixed_simulated_calendar",
+      "known_at": "2026-10-22T10:00:00+09:00",
+      "days": [
+        {
+          "day": "2026-10-23",
+          "business": true,
+          "opens": "09:00:00",
+          "closes": "15:30:00"
+        },
+        {
+          "day": "2026-10-24",
+          "business": false,
+          "opens": "09:00:00",
+          "closes": "15:30:00"
+        },
+        {
+          "day": "2026-10-25",
+          "business": false,
+          "opens": "09:00:00",
+          "closes": "15:30:00"
+        },
+        {
+          "day": "2026-10-26",
+          "business": true,
+          "opens": "09:00:00",
+          "closes": "15:30:00"
+        },
+        {
+          "day": "2026-10-27",
+          "business": true,
+          "opens": "09:00:00",
+          "closes": "15:30:00"
+        },
+        {
+          "day": "2026-10-28",
+          "business": true,
+          "opens": "09:00:00",
+          "closes": "15:30:00"
+        },
+        {
+          "day": "2026-10-29",
+          "business": true,
+          "opens": "09:00:00",
+          "closes": "15:30:00"
+        },
+        {
+          "day": "2026-10-30",
+          "business": true,
+          "opens": "09:00:00",
+          "closes": "15:30:00"
+        },
+        {
+          "day": "2026-10-31",
+          "business": false,
+          "opens": "09:00:00",
+          "closes": "15:30:00"
+        },
+        {
+          "day": "2026-11-01",
+          "business": false,
+          "opens": "09:00:00",
+          "closes": "15:30:00"
+        },
+        {
+          "day": "2026-11-02",
+          "business": true,
+          "opens": "09:00:00",
+          "closes": "15:30:00"
+        },
+        {
+          "day": "2026-11-03",
+          "business": false,
+          "opens": "09:00:00",
+          "closes": "15:30:00"
+        },
+        {
+          "day": "2026-11-04",
+          "business": true,
+          "opens": "09:00:00",
+          "closes": "15:30:00"
+        }
+      ]
+    },
+    "definition_version": "v1",
+    "model_version": "unchanged-fixed-fixture",
+    "retry_seconds": 1800,
+    "max_attempts": 20,
+    "postprocess_budget": 100
+  },
+  "paper_fixture": {
+    "risk": {
+      "mode": "mock",
+      "initial_cash": "100000",
+      "evidence_at": "2026-01-05T01:00:00Z",
+      "max_evidence_age_seconds": 3600,
+      "initial_positions": {},
+      "rules": [
+        {
+          "code": "MOCK-A",
+          "mark": "100",
+          "known_at": "2026-01-05T01:00:00Z",
+          "valid_from": "2026-01-05T01:00:00Z",
+          "valid_until": "2026-01-06T01:00:00Z",
+          "lot_size": 10,
+          "tick_size": "1",
+          "lower": "50",
+          "upper": "150",
+          "can_buy": true,
+          "can_sell": true,
+          "short_allowed": true,
+          "short_capacity": 1000,
+          "additional_collateral": "1",
+          "fee_fixed": "1",
+          "fee_per_share": "0.01"
+        }
+      ],
+      "max_order_quantity": 1000,
+      "max_order_value": "100000",
+      "max_position_quantity": 1000,
+      "max_gross_value": "100000",
+      "short_credit_limit": "100000",
+      "cash_floor": "1000",
+      "day_start_equity": "100000",
+      "max_daily_loss_fraction": "0.1"
+    },
+    "market": {
+      "evidence": "simulated",
+      "sessions": [
+        {
+          "opens_at": "2026-01-05T01:00:00Z",
+          "closes_at": "2026-01-05T02:00:00Z"
+        }
+      ],
+      "quotes": [
+        {
+          "code": "MOCK-A",
+          "price": "100",
+          "known_at": "2026-01-05T01:00:00Z",
+          "evidence": "simulated",
+          "source_updated_at": null,
+          "freshness_verified": false
+        }
+      ],
+      "boards": [
+        {
+          "code": "MOCK-A",
+          "bids": [
+            {
+              "price": "99",
+              "quantity": 1000
+            }
+          ],
+          "asks": [
+            {
+              "price": "101",
+              "quantity": 1000
+            }
+          ],
+          "known_at": "2026-01-05T01:00:00Z",
+          "evidence": "simulated"
+        }
+      ],
+      "shorts": [
+        {
+          "code": "MOCK-A",
+          "credit": "general",
+          "allowed": true,
+          "quantity": 1000,
+          "known_at": "2026-01-05T01:00:00Z",
+          "valid_until": "2026-01-05T02:00:00Z",
+          "evidence": "simulated"
+        },
+        {
+          "code": "MOCK-A",
+          "credit": "standard",
+          "allowed": true,
+          "quantity": 1000,
+          "known_at": "2026-01-05T01:00:00Z",
+          "valid_until": "2026-01-05T02:00:00Z",
+          "evidence": "simulated"
+        }
+      ],
+      "max_age_seconds": 3600
+    }
+  },
+  "responses": {
+    "evidence": "simulated",
+    "responses": {
+      "prices:2026-10-23": [
+        {
+          "evidence": "simulated",
+          "available_at": "2026-10-23T16:30:00+09:00",
+          "target_day": "2026-10-23",
+          "complete": true,
+          "empty_reason": null,
+          "published_at": null,
+          "expected_keys": [
+            "31050"
+          ],
+          "pages": [
+            [
+              {
+                "Date": "2026-10-23",
+                "Code": "31050",
+                "O": 100,
+                "H": 101,
+                "L": 99,
+                "C": 100,
+                "Vo": 1000,
+                "Va": 100000,
+                "AdjFactor": 1,
+                "AdjO": 100,
+                "AdjH": 101,
+                "AdjL": 99,
+                "AdjC": 100,
+                "AdjVo": 1000
+              }
+            ]
+          ]
+        }
+      ],
+      "topix:2026-10-23": [
+        {
+          "evidence": "simulated",
+          "available_at": "2026-10-23T16:30:00+09:00",
+          "target_day": "2026-10-23",
+          "complete": true,
+          "empty_reason": null,
+          "published_at": null,
+          "expected_keys": [
+            "2026-10-23"
+          ],
+          "pages": [
+            [
+              {
+                "Date": "2026-10-23",
+                "O": 100,
+                "H": 101,
+                "L": 99,
+                "C": 100
+              }
+            ]
+          ]
+        }
+      ],
+      "master:2026-10-23": [
+        {
+          "evidence": "simulated",
+          "available_at": "2026-10-23T16:30:00+09:00",
+          "target_day": "2026-10-23",
+          "complete": true,
+          "empty_reason": null,
+          "published_at": null,
+          "expected_keys": [
+            "31050"
+          ],
+          "pages": [
+            [
+              {
+                "Date": "2026-10-23",
+                "Code": "31050",
+                "CoName": "SIMULATED",
+                "Mkt": "0111",
+                "S17": "1",
+                "S33": "1",
+                "ProdCat": "011"
+              }
+            ]
+          ]
+        }
+      ],
+      "financials:2026-10-23": [
+        {
+          "evidence": "simulated",
+          "available_at": "2026-10-23T16:30:00+09:00",
+          "target_day": "2026-10-23",
+          "complete": true,
+          "empty_reason": "no_disclosure",
+          "published_at": null,
+          "expected_keys": [],
+          "pages": [
+            []
+          ]
+        }
+      ],
+      "prices:2026-10-26": [
+        {
+          "evidence": "simulated",
+          "available_at": "2026-10-26T16:30:00+09:00",
+          "target_day": "2026-10-26",
+          "complete": true,
+          "empty_reason": null,
+          "published_at": null,
+          "expected_keys": [
+            "31050"
+          ],
+          "pages": [
+            [
+              {
+                "Date": "2026-10-26",
+                "Code": "31050",
+                "O": 100,
+                "H": 101,
+                "L": 99,
+                "C": 100,
+                "Vo": 1000,
+                "Va": 100000,
+                "AdjFactor": 1,
+                "AdjO": 100,
+                "AdjH": 101,
+                "AdjL": 99,
+                "AdjC": 100,
+                "AdjVo": 1000
+              }
+            ]
+          ]
+        }
+      ],
+      "topix:2026-10-26": [
+        {
+          "evidence": "simulated",
+          "available_at": "2026-10-26T16:30:00+09:00",
+          "target_day": "2026-10-26",
+          "complete": true,
+          "empty_reason": null,
+          "published_at": null,
+          "expected_keys": [
+            "2026-10-26"
+          ],
+          "pages": [
+            [
+              {
+                "Date": "2026-10-26",
+                "O": 100,
+                "H": 101,
+                "L": 99,
+                "C": 100
+              }
+            ]
+          ]
+        }
+      ],
+      "master:2026-10-26": [
+        {
+          "evidence": "simulated",
+          "available_at": "2026-10-26T16:30:00+09:00",
+          "target_day": "2026-10-26",
+          "complete": true,
+          "empty_reason": null,
+          "published_at": null,
+          "expected_keys": [
+            "31050"
+          ],
+          "pages": [
+            [
+              {
+                "Date": "2026-10-26",
+                "Code": "31050",
+                "CoName": "SIMULATED",
+                "Mkt": "0111",
+                "S17": "1",
+                "S33": "1",
+                "ProdCat": "011"
+              }
+            ]
+          ]
+        }
+      ],
+      "financials:2026-10-26": [
+        {
+          "evidence": "simulated",
+          "available_at": "2026-10-26T16:30:00+09:00",
+          "target_day": "2026-10-26",
+          "complete": true,
+          "empty_reason": "no_disclosure",
+          "published_at": null,
+          "expected_keys": [],
+          "pages": [
+            []
+          ]
+        }
+      ],
+      "prices:2026-10-27": [
+        {
+          "evidence": "simulated",
+          "available_at": "2026-10-27T16:30:00+09:00",
+          "target_day": "2026-10-27",
+          "complete": true,
+          "empty_reason": null,
+          "published_at": null,
+          "expected_keys": [
+            "31050"
+          ],
+          "pages": [
+            [
+              {
+                "Date": "2026-10-27",
+                "Code": "31050",
+                "O": 100,
+                "H": 101,
+                "L": 99,
+                "C": 100,
+                "Vo": 1000,
+                "Va": 100000,
+                "AdjFactor": 1,
+                "AdjO": 100,
+                "AdjH": 101,
+                "AdjL": 99,
+                "AdjC": 100,
+                "AdjVo": 1000
+              }
+            ]
+          ]
+        }
+      ],
+      "topix:2026-10-27": [
+        {
+          "evidence": "simulated",
+          "available_at": "2026-10-27T16:30:00+09:00",
+          "target_day": "2026-10-27",
+          "complete": true,
+          "empty_reason": null,
+          "published_at": null,
+          "expected_keys": [
+            "2026-10-27"
+          ],
+          "pages": [
+            [
+              {
+                "Date": "2026-10-27",
+                "O": 100,
+                "H": 101,
+                "L": 99,
+                "C": 100
+              }
+            ]
+          ]
+        }
+      ],
+      "master:2026-10-27": [
+        {
+          "evidence": "simulated",
+          "available_at": "2026-10-27T16:30:00+09:00",
+          "target_day": "2026-10-27",
+          "complete": true,
+          "empty_reason": null,
+          "published_at": null,
+          "expected_keys": [
+            "31050"
+          ],
+          "pages": [
+            [
+              {
+                "Date": "2026-10-27",
+                "Code": "31050",
+                "CoName": "SIMULATED",
+                "Mkt": "0111",
+                "S17": "1",
+                "S33": "1",
+                "ProdCat": "011"
+              }
+            ]
+          ]
+        }
+      ],
+      "financials:2026-10-27": [
+        {
+          "evidence": "simulated",
+          "available_at": "2026-10-27T16:30:00+09:00",
+          "target_day": "2026-10-27",
+          "complete": true,
+          "empty_reason": "no_disclosure",
+          "published_at": null,
+          "expected_keys": [],
+          "pages": [
+            []
+          ]
+        }
+      ]
+    }
+  },
+  "ticks": [
+    "2026-10-26T15:59:00+09:00",
+    "2026-10-26T16:00:00+09:00"
+  ]
+}

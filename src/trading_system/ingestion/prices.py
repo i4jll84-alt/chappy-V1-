@@ -51,36 +51,44 @@ def ingest_prices(store: Store, client, params: dict, plan: str, refresh: bool =
     params = price_query(params["code"], params["from"], params["to"])
     job = store.start(params, plan, refresh)
     job_id = job["job_id"]
+    previous_callback = client.on_attempt
     client.on_attempt = lambda **event: store.attempt(job_id, **event)
-    if job["state"] in {"complete", "empty", "quality_failed"}:
-        return {
-            "job_id": job_id,
-            "state": job["state"],
-            "cached": True,
-            "rows_received": job["rows_received"],
-        }
     try:
-        if job["state"] != "fetched" and job["error_category"] != "export_failed":
-            for _ in range(10000):
-                request = dict(params)
-                if job["cursor"]:
-                    request["pagination_key"] = job["cursor"]
-                body = client.get_page(request)
-                observed_at = utcnow()
-                raw = client.last_response_bytes
-                if raw is None:
-                    raise ValueError("Original HTTP response bytes are required")
-                store.save_page(job_id, body, raw, observed_at)
-                job = store.job(job_id)
-                if job["state"] == "fetched":
-                    break
-            else:
-                raise ValueError("Pagination page limit exceeded")
-    except Exception as exc:
-        store.fail(job_id, getattr(exc, "category", "ingestion_failed"))
-        raise
-    try:
-        return store.finish(job_id)
-    except Exception:
-        store.fail(job_id, "export_failed")
-        raise
+        if job["state"] in {"complete", "empty", "quality_failed"}:
+            # The catalog is authoritative after an interrupted pointer publication.
+            manifest = store.export()
+            return {
+                "job_id": job_id,
+                "state": job["state"],
+                "cached": True,
+                "rows_received": job["rows_received"],
+                "parquet_generation": manifest["generation"],
+                "verified_duckdb_read": True,
+            }
+        try:
+            if job["state"] != "fetched" and job["error_category"] != "export_failed":
+                for _ in range(10000):
+                    request = dict(params)
+                    if job["cursor"]:
+                        request["pagination_key"] = job["cursor"]
+                    body = client.get_page(request)
+                    observed_at = utcnow()
+                    raw = client.last_response_bytes
+                    if raw is None:
+                        raise ValueError("Original HTTP response bytes are required")
+                    store.save_page(job_id, body, raw, observed_at)
+                    job = store.job(job_id)
+                    if job["state"] == "fetched":
+                        break
+                else:
+                    raise ValueError("Pagination page limit exceeded")
+        except Exception as exc:
+            store.fail(job_id, getattr(exc, "category", "ingestion_failed"))
+            raise
+        try:
+            return store.finish(job_id)
+        except Exception:
+            store.fail(job_id, "export_failed")
+            raise
+    finally:
+        client.on_attempt = previous_callback

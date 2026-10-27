@@ -1,0 +1,96 @@
+{
+  "risk": {
+    "mode": "mock",
+    "initial_cash": "100000",
+    "evidence_at": "2026-01-05T01:00:00Z",
+    "max_evidence_age_seconds": 3600,
+    "initial_positions": {},
+    "rules": [
+      {
+        "code": "MOCK-A",
+        "mark": "100",
+        "known_at": "2026-01-05T01:00:00Z",
+        "valid_from": "2026-01-05T01:00:00Z",
+        "valid_until": "2026-01-06T01:00:00Z",
+        "lot_size": 10,
+        "tick_size": "1",
+        "lower": "50",
+        "upper": "150",
+        "can_buy": true,
+        "can_sell": true,
+        "short_allowed": true,
+        "short_capacity": 1000,
+        "additional_collateral": "1",
+        "fee_fixed": "1",
+        "fee_per_share": "0.01"
+      }
+    ],
+    "max_order_quantity": 1000,
+    "max_order_value": "100000",
+    "max_position_quantity": 1000,
+    "max_gross_value": "100000",
+    "short_credit_limit": "100000",
+    "cash_floor": "1000",
+    "day_start_equity": "100000",
+    "max_daily_loss_fraction": "0.1"
+  },
+  "market": {
+    "evidence": "simulated",
+    "sessions": [
+      {
+        "opens_at": "2026-01-05T01:00:00Z",
+        "closes_at": "2026-01-05T02:00:00Z"
+      }
+    ],
+    "quotes": [
+      {
+        "code": "MOCK-A",
+        "price": "100",
+        "known_at": "2026-01-05T01:00:00Z",
+        "evidence": "simulated",
+        "source_updated_at": null,
+        "freshness_verified": false
+      }
+    ],
+    "boards": [
+      {
+        "code": "MOCK-A",
+        "bids": [
+          {
+            "price": "99",
+            "quantity": 1000
+          }
+        ],
+        "asks": [
+          {
+            "price": "101",
+            "quantity": 1000
+          }
+        ],
+        "known_at": "2026-01-05T01:00:00Z",
+        "evidence": "simulated"
+      }
+    ],
+    "shorts": [
+      {
+        "code": "MOCK-A",
+        "credit": "general",
+        "allowed": true,
+        "quantity": 1000,
+        "known_at": "2026-01-05T01:00:00Z",
+        "valid_until": "2026-01-05T02:00:00Z",
+        "evidence": "simulated"
+      },
+      {
+        "code": "MOCK-A",
+        "credit": "standard",
+        "allowed": true,
+        "quantity": 1000,
+        "known_at": "2026-01-05T01:00:00Z",
+        "valid_until": "2026-01-05T02:00:00Z",
+        "evidence": "simulated"
+      }
+    ],
+    "max_age_seconds": 3600
+  }
+}

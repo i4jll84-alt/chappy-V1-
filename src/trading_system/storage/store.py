@@ -4,7 +4,7 @@ import hashlib
 import json
 import math
 import os
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -134,12 +134,15 @@ class Store:
 
     def fail(self, job_id: str, category: str) -> None:
         self.db.execute(
-            "UPDATE jobs SET state='failed',error_category=?,updated_at=? WHERE job_id=?",
+            "UPDATE jobs SET state='failed',error_category=?,updated_at=? WHERE job_id=? "
+            "AND state NOT IN ('complete','empty','quality_failed')",
             [category, utcnow(), job_id],
         )
 
     def save_page(self, job_id: str, body: dict, raw_bytes: bytes, observed_at: datetime) -> None:
         job = self.job(job_id)
+        if job["state"] not in {"running", "failed"} or job["error_category"] == "export_failed":
+            raise ValueError("Job is not accepting pages")
         observed_at = aware_utc(observed_at)
         params = json.loads(job["params_json"])
         page_number = job["pages"]
@@ -340,17 +343,37 @@ class Store:
             self.db.execute("ROLLBACK")
             raise
 
-    def as_of(self, decision_at: datetime):
-        # Pick version first, THEN reject errors: never fall back to superseded clean data.
+    def as_of(self, decision_at: datetime, params: dict | None = None):
+        """Return one finalized query snapshot using recorded completion evidence.
+
+        Legacy stored availability is only a row observation bound. A snapshot
+        also requires the terminal job's immutable updated_at plus one second.
+        Without params, select the latest finalized query across all prices.
+        """
+        cutoff = aware_utc(decision_at)
+        args = [cutoff - timedelta(seconds=1)]
+        where = "updated_at<=? AND state IN ('complete','empty','quality_failed')"
+        if params is not None:
+            from trading_system.ingestion.prices import price_query
+
+            where += " AND params_json=?"
+            args.append(canonical(price_query(params["code"], params["from"], params["to"])))
+        args.append(cutoff)
         return self.db.execute(
-            """
-            SELECT * FROM (
-                SELECT * FROM price_versions WHERE available_at <= ?
-                QUALIFY row_number() OVER (
-                    PARTITION BY code,target_date ORDER BY version_id DESC)=1
-            ) WHERE quality_status='ok' ORDER BY code,target_date
-        """,
-            [aware_utc(decision_at)],
+            "WITH chosen AS (SELECT job_id,state,updated_at FROM jobs WHERE "
+            + where
+            + " ORDER BY updated_at DESC,started_at DESC,job_id DESC LIMIT 1), selected AS ("
+            "SELECT v.* REPLACE (greatest(v.available_at,c.updated_at + INTERVAL '1 second') "
+            "AS available_at,'job_terminal_updated_at_plus_1_second_v1' AS availability_rule),"
+            "c.job_id AS snapshot_job_id,c.updated_at AS snapshot_finalized_at,"
+            "'terminal_updated_at' AS finalization_source,o.page_number,o.row_index "
+            "FROM observations o JOIN chosen c ON o.job_id=c.job_id AND c.state='complete' "
+            "JOIN price_versions v ON o.version_id=v.version_id "
+            "QUALIFY row_number() OVER (PARTITION BY o.code,o.target_date "
+            "ORDER BY o.page_number DESC,o.row_index DESC)=1) "
+            "SELECT * EXCLUDE(page_number,row_index) FROM selected "
+            "WHERE quality_status='ok' AND available_at<=? ORDER BY code,target_date",
+            args,
         ).to_arrow_table()
 
     def export(self) -> dict:
@@ -362,6 +385,8 @@ class Store:
             "price_versions": "price_versions",
             "prices_current": "prices_current",
             "quality_issues": "quality_issues",
+            "observations": "observations",
+            "attempts": "attempts",
             "pages": "pages",
             "jobs": "jobs",
         }
@@ -394,6 +419,22 @@ class Store:
 
     def finish(self, job_id: str) -> dict:
         job = self.job(job_id)
+        final_page = self.db.execute(
+            "SELECT page_number,next_cursor,max(observed_at) OVER () FROM pages "
+            "WHERE job_id=? ORDER BY page_number DESC LIMIT 1",
+            [job_id],
+        ).fetchone()
+        if (
+            not (
+                job["state"] == "fetched"
+                or (job["state"] == "failed" and job["error_category"] == "export_failed")
+            )
+            or job["cursor"] is not None
+            or final_page is None
+            or final_page[0] != job["pages"] - 1
+            or final_page[1] is not None
+        ):
+            raise ValueError("Job must have a saved final page before finalization")
         errors = self.db.execute(
             "SELECT count(*) FROM quality_issues WHERE job_id=? AND severity='error'", [job_id]
         ).fetchone()[0]
@@ -404,7 +445,7 @@ class Store:
         try:
             self.db.execute(
                 "UPDATE jobs SET state=?,error_category=NULL,updated_at=? WHERE job_id=?",
-                [state, utcnow(), job_id],
+                [state, max(utcnow(), final_page[2]), job_id],
             )
             manifest = self.export()
             self.db.execute("COMMIT")

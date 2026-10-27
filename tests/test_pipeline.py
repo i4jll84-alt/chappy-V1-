@@ -2,6 +2,7 @@ import copy
 import hashlib
 import json
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -59,7 +60,13 @@ def save(store, row, when):
     job = store.start(PARAMS, "standard", refresh=True)
     body = {"data": [row]}
     store.save_page(job["job_id"], body, json.dumps(body).encode(), when)
+    finish(store, job["job_id"], when)
     return job["job_id"]
+
+
+def finish(store, job_id, when):
+    with patch("trading_system.storage.store.utcnow", return_value=when):
+        return store.finish(job_id)
 
 
 def test_nonempty_parquet_is_read_and_manifest_hash_verified(store):
@@ -310,6 +317,7 @@ def test_same_payload_quality_context_changes_create_pit_versions(store):
         job = store.start(params, "standard", refresh=True)
         observed = OBSERVED + timedelta(hours=index)
         store.save_page(job["job_id"], body, raw, observed)
+        finish(store, job["job_id"], observed)
         visible = store.as_of(observed + timedelta(seconds=1))
         assert visible.num_rows == (1 if index == 1 else 0)
     assert count(store, "price_versions") == 3
@@ -371,7 +379,9 @@ def test_conflicting_duplicates_stay_quarantined_until_new_refresh(store, closes
         store.save_page(
             job["job_id"], body, json.dumps(body).encode(), OBSERVED + timedelta(minutes=index)
         )
-    assert store.finish(job["job_id"])["state"] == "quality_failed"
+    assert (
+        finish(store, job["job_id"], OBSERVED + timedelta(minutes=2))["state"] == "quality_failed"
+    )
     assert store.db.execute("SELECT quality_status FROM prices_current").fetchone()[0] == "error"
     conflicts = store.db.execute(
         "SELECT count(*) FROM quality_issues WHERE job_id=? "
@@ -386,8 +396,215 @@ def test_conflicting_duplicates_stay_quarantined_until_new_refresh(store, closes
     recovery_at = OBSERVED + timedelta(hours=1)
     body = {"data": [rows[-1]]}
     store.save_page(refreshed["job_id"], body, json.dumps(body).encode(), recovery_at)
-    assert store.finish(refreshed["job_id"])["state"] == "complete"
+    assert finish(store, refreshed["job_id"], recovery_at)["state"] == "complete"
     assert store.db.execute("SELECT quality_status FROM prices_current").fetchone()[0] == "ok"
     assert store.as_of(recovery_at).num_rows == 0
     assert store.as_of(recovery_at + timedelta(seconds=1))["close"].to_pylist() == [closes[-1]]
     assert store.as_of(after_conflicts).num_rows == 0
+
+
+def test_snapshot_waits_for_all_pages_and_completion_boundary(store):
+    job_id = store.start(PARAMS, "standard")["job_id"]
+    first = {"data": [bar()], "pagination_key": "next"}
+    store.save_page(job_id, first, json.dumps(first).encode(), OBSERVED)
+    assert store.as_of(OBSERVED + timedelta(minutes=10)).num_rows == 0
+    store.fail(job_id, "ingestion_failed")
+    assert store.as_of(OBSERVED + timedelta(minutes=10)).num_rows == 0
+    second = {"data": [bar(Date="2026-10-02")]}
+    store.save_page(job_id, second, json.dumps(second).encode(), OBSERVED + timedelta(minutes=1))
+    assert store.as_of(OBSERVED + timedelta(minutes=10)).num_rows == 0
+    completed = OBSERVED + timedelta(minutes=2)
+    finish(store, job_id, completed)
+    assert store.as_of(completed).num_rows == 0
+    visible = store.as_of(completed + timedelta(seconds=1))
+    assert visible["close"].to_pylist() == [105, 105]
+    assert visible["available_at"].to_pylist() == [completed + timedelta(seconds=1)] * 2
+    assert visible["snapshot_job_id"].to_pylist() == [job_id] * 2
+    assert visible["finalization_source"].to_pylist() == ["terminal_updated_at"] * 2
+    assert (
+        visible["availability_rule"].to_pylist() == ["job_terminal_updated_at_plus_1_second_v1"] * 2
+    )
+    # Original legacy row evidence is immutable, including its observation bound.
+    assert store.db.execute(
+        "SELECT available_at FROM price_versions ORDER BY version_id"
+    ).fetchall() == [
+        (OBSERVED + timedelta(seconds=1),),
+        (OBSERVED + timedelta(minutes=1, seconds=1),),
+    ]
+
+
+def test_snapshot_membership_and_exact_query_never_union_old_rows(store):
+    first = save(store, bar(), OBSERVED)
+    second = save(store, bar(Date="2026-10-02"), OBSERVED + timedelta(minutes=1))
+    decision = OBSERVED + timedelta(hours=1)
+    assert store.as_of(decision)["target_date"].to_pylist() == [datetime(2026, 10, 2).date()]
+    # A failed or incomplete refresh contributes no rows to the last finalized snapshot.
+    job_id = store.start(PARAMS, "standard", refresh=True)["job_id"]
+    body = {"data": [bar(C=109, AdjC=109)], "pagination_key": "next"}
+    store.save_page(job_id, body, json.dumps(body).encode(), OBSERVED + timedelta(minutes=2))
+    for fail in (False, True):
+        if fail:
+            store.fail(job_id, "ingestion_failed")
+        assert store.as_of(decision)["snapshot_job_id"].to_pylist() == [second]
+    other = price_query("1301", PARAMS["from"], PARAMS["to"])
+    other_id = store.start(other, "standard", refresh=True)["job_id"]
+    body = {"data": [bar(Code="13010")]}
+    store.save_page(other_id, body, json.dumps(body).encode(), OBSERVED + timedelta(minutes=3))
+    finish(store, other_id, OBSERVED + timedelta(minutes=3))
+    assert store.as_of(decision)["code"].to_pylist() == ["13010"]
+    assert store.as_of(decision, PARAMS)["snapshot_job_id"].to_pylist() == [second]
+    assert first != second
+
+
+@pytest.mark.parametrize("rows,terminal", [([], "empty"), ([bar(C=-1)], "quality_failed")])
+def test_finalized_nonclean_snapshot_masks_previous_clean_snapshot(store, rows, terminal):
+    save(store, bar(), OBSERVED)
+    job_id = store.start(PARAMS, "standard", refresh=True)["job_id"]
+    body = {"data": rows}
+    moment = OBSERVED + timedelta(minutes=1)
+    store.save_page(job_id, body, json.dumps(body).encode(), moment)
+    assert finish(store, job_id, moment)["state"] == terminal
+    assert store.as_of(moment)["close"].to_pylist() == [105]
+    assert store.as_of(moment + timedelta(seconds=1)).num_rows == 0
+
+
+def test_snapshot_respects_later_stored_row_availability(store):
+    job_id = save(store, bar(), OBSERVED)
+    later = OBSERVED + timedelta(minutes=5)
+    store.db.execute("UPDATE price_versions SET available_at=?", [later])
+    assert store.as_of(later - timedelta(microseconds=1)).num_rows == 0
+    assert store.as_of(later)["snapshot_job_id"].to_pylist() == [job_id]
+
+
+@pytest.mark.parametrize("terminal", ["complete", "empty", "quality_failed"])
+def test_terminal_job_evidence_cannot_be_mutated_by_lifecycle_methods(store, terminal):
+    rows = {"complete": [bar()], "empty": [], "quality_failed": [bar(C=-1)]}[terminal]
+    result = ingest(store, rows)
+    job_id = result["job_id"]
+    before = store.job(job_id)
+    store.fail(job_id, "export_failed")
+    with pytest.raises(ValueError, match="final page"):
+        store.finish(job_id)
+    body = {"data": [bar()]}
+    with pytest.raises(ValueError, match="accepting pages"):
+        store.save_page(job_id, body, json.dumps(body).encode(), OBSERVED)
+    assert store.job(job_id) == before
+
+
+@pytest.mark.parametrize("stage", ["fresh", "unfinished", "forged_export_failure"])
+def test_finish_requires_saved_final_page(store, stage):
+    job_id = store.start(PARAMS, "standard")["job_id"]
+    if stage != "fresh":
+        body = {"data": [bar()], "pagination_key": "next"}
+        store.save_page(job_id, body, json.dumps(body).encode(), OBSERVED)
+    if stage == "forged_export_failure":
+        store.fail(job_id, "export_failed")
+        store.db.execute("UPDATE jobs SET cursor=NULL WHERE job_id=?", [job_id])
+    before = store.job(job_id)
+    with pytest.raises(ValueError, match="final page"):
+        store.finish(job_id)
+    assert store.job(job_id) == before
+    assert store.as_of(datetime(2099, 1, 1, tzinfo=timezone.utc)).num_rows == 0
+
+
+def test_finish_completion_cannot_precede_observed_pages(store):
+    job_id = store.start(PARAMS, "standard")["job_id"]
+    body = {"data": [bar()]}
+    store.save_page(job_id, body, json.dumps(body).encode(), OBSERVED)
+    finish(store, job_id, OBSERVED - timedelta(hours=1))
+    assert store.job(job_id)["updated_at"] == OBSERVED
+    assert store.as_of(OBSERVED).num_rows == 0
+
+
+def test_cached_ingestion_rebuilds_deleted_parquet_without_network_or_job_mutation(store):
+    result = ingest(store, [bar()])
+    job = store.job(result["job_id"])
+    manifest = json.loads((store.root / "normalized/latest.json").read_bytes())
+    (store.root / manifest["files"]["price_versions"]["path"]).unlink()
+    (store.root / "normalized/latest.json").write_text('{"interrupted":true}')
+    with api(lambda _: pytest.fail("cached recovery must not access network")) as client:
+        cached = ingest_prices(store, client, PARAMS, "standard")
+    assert cached["cached"] and cached["verified_duckdb_read"]
+    assert cached["parquet_generation"] != manifest["generation"]
+    rebuilt = json.loads((store.root / "normalized/latest.json").read_bytes())
+    assert rebuilt["files"]["observations"]["rows"] == 1
+    assert rebuilt["files"]["attempts"]["rows"] == 1
+    path = store.root / rebuilt["files"]["price_versions"]["path"]
+    assert store.db.execute("SELECT count(*) FROM read_parquet(?)", [str(path)]).fetchone()[0] == 1
+    assert store.job(result["job_id"]) == job
+
+
+@pytest.mark.parametrize(
+    "mode", ["success", "cached", "http_error", "export_error", "cached_export_error"]
+)
+def test_ingestion_restores_client_callback_on_every_exit(store, monkeypatch, mode):
+    if mode.startswith("cached"):
+        result = ingest(store, [bar()])
+        terminal_before = store.job(result["job_id"])
+    if "export_error" in mode:
+
+        def broken_export():
+            raise OSError("simulated export failure")
+
+        monkeypatch.setattr(store, "export", broken_export)
+
+    def callback(**_):
+        return None
+
+    status = 401 if mode == "http_error" else 200
+    with api(lambda _: httpx.Response(status, json={"data": [bar()]})) as client:
+        client.on_attempt = callback
+        if "error" in mode:
+            expected = APIError if mode == "http_error" else OSError
+            with pytest.raises(expected):
+                ingest_prices(store, client, PARAMS, "standard")
+        else:
+            ingest_prices(store, client, PARAMS, "standard")
+        assert client.on_attempt is callback
+    if mode == "cached_export_error":
+        assert store.job(result["job_id"]) == terminal_before
+
+
+def test_identical_refresh_uses_new_job_completion_without_rewriting_version(store):
+    first = save(store, bar(), OBSERVED)
+    stored_before = store.db.execute("SELECT * FROM price_versions").fetchall()
+    later = OBSERVED + timedelta(hours=1)
+    second = save(store, bar(), later)
+    assert store.db.execute("SELECT * FROM price_versions").fetchall() == stored_before
+    assert store.as_of(later)["snapshot_job_id"].to_pylist() == [first]
+    refreshed = store.as_of(later + timedelta(seconds=1))
+    assert refreshed["snapshot_job_id"].to_pylist() == [second]
+    assert refreshed["available_at"].to_pylist() == [later + timedelta(seconds=1)]
+
+
+def test_mixed_quality_snapshot_excludes_all_rows_without_older_fallback(store):
+    save(store, bar(), OBSERVED)
+    job_id = store.start(PARAMS, "standard", refresh=True)["job_id"]
+    moment = OBSERVED + timedelta(minutes=1)
+    body = {"data": [bar(Date="2026-10-02"), bar(C=-1)]}
+    store.save_page(job_id, body, json.dumps(body).encode(), moment)
+    assert finish(store, job_id, moment)["state"] == "quality_failed"
+    assert store.as_of(moment + timedelta(seconds=1)).num_rows == 0
+
+
+def test_receipt_write_failure_keeps_committed_job_completion(store, monkeypatch):
+    from trading_system.storage import store as storage
+
+    original = storage.atomic_write
+
+    def fail_receipt(path, content):
+        if path.parent == store.root / "logs":
+            raise OSError("simulated receipt failure")
+        return original(path, content)
+
+    monkeypatch.setattr(storage, "atomic_write", fail_receipt)
+    with pytest.raises(OSError, match="receipt failure"):
+        ingest(store, [bar()])
+    job_id = store.db.execute("SELECT job_id FROM jobs").fetchone()[0]
+    committed = store.job(job_id)
+    assert committed["state"] == "complete"
+    assert committed["error_category"] is None
+    assert store.as_of(committed["updated_at"] + timedelta(seconds=1)).num_rows == 1
+    with api(lambda _: pytest.fail("committed job must not refetch")) as client:
+        assert ingest_prices(store, client, PARAMS, "standard")["cached"]
+    assert store.job(job_id) == committed

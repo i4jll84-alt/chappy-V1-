@@ -21,6 +21,13 @@ class APIError(Exception):
 
 class JQuantsClient:
     URL = "https://api.jquants.com/v2/equities/bars/daily"
+    ENDPOINTS = {
+        "prices": URL,
+        "topix": "https://api.jquants.com/v2/indices/bars/daily/topix",
+        "financials": "https://api.jquants.com/v2/fins/summary",
+        "master": "https://api.jquants.com/v2/equities/master",
+        "calendar": "https://api.jquants.com/v2/markets/calendar",
+    }
     LIMITS = {"free": 5, "light": 60, "standard": 120, "premium": 500}
 
     def __init__(
@@ -30,12 +37,17 @@ class JQuantsClient:
         transport=None,
         sleep: Callable[[float], None] = time.sleep,
         on_attempt: Callable[..., None] | None = None,
+        endpoint: str = "prices",
     ):
         if not isinstance(api_key, str) or not api_key.strip():
             raise ValueError("A nonempty API key is required")
         if plan not in self.LIMITS:
             raise ValueError("Unknown J-Quants plan")
-        self._interval = 60 / self.LIMITS[plan]
+        if endpoint not in self.ENDPOINTS:
+            raise ValueError("Unsupported J-Quants endpoint")
+        self.endpoint = endpoint
+        self._url = self.ENDPOINTS[endpoint]
+        self._interval = 1.0 if endpoint == "financials" else 60 / self.LIMITS[plan]
         self._sleep = sleep
         self.on_attempt = on_attempt
         self._last_attempt: float | None = None
@@ -78,7 +90,7 @@ class JQuantsClient:
                 self._wait(max(0, self._interval - (time.monotonic() - self._last_attempt)))
             self._last_attempt = time.monotonic()
             try:
-                response = self._client.get(self.URL, params=params)
+                response = self._client.get(self._url, params=params)
             except httpx.TransportError:
                 self._record(None, "transport_error")
                 if attempt == 3:

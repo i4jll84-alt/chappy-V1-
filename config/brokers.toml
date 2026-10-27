@@ -1,0 +1,17 @@
+# Phase 1: changing these values cannot enable real orders.
+[trading]
+mode = "paper"
+broker = "rakuten"
+live_trading_enabled = false
+
+[brokers.rakuten]
+enabled = true
+account_alias = "paper-main"
+
+[brokers.tachibana]
+enabled = false
+account_alias = "paper-main"
+
+[brokers.mufg_esmart]
+enabled = false
+account_alias = "paper-main"
