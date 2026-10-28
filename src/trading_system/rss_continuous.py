@@ -15,6 +15,7 @@ from trading_system.data_sources.rss_live import observe
 from trading_system.monitoring.rss import audit, audit_runs
 from trading_system.paper_rss import PaperLedger
 from trading_system.point_in_time.policy import aware_utc
+from trading_system.rss_startup import assess_startup
 from trading_system.runtime.models import daytime_deadline
 from trading_system.storage.rss import RSSStore
 from trading_system.storage.store import atomic_write, canonical
@@ -58,6 +59,7 @@ def run(
     sleeper=time.sleep,
     utcnow=lambda: datetime.now(UTC),
     recover_only=False,
+    wait_for_current_date=False,
     progress=None,
 ):
     if not re.fullmatch(r"[0-9A-Z]{4,5}\.T", code):
@@ -97,6 +99,9 @@ def run(
             attention_samples=0,
             recovered_samples=0,
             recovered_incomplete_runs=0,
+            startup_status="not_requested",
+            startup_attempts=0,
+            startup_samples=0,
         )
         # Keep old session files unchanged, including evidence of interrupted shutdown.
         report["previous_unfinished_sessions"] = [
@@ -187,6 +192,75 @@ def run(
                     }
                 )
 
+        def await_current_date(store):
+            report.update(phase="checking_startup", startup_status="checking")
+            persist()
+            last_state = None
+            while not stop_requested():
+                folder, summary = observer(
+                    workbook,
+                    code,
+                    runs_root,
+                    samples=3,
+                    interval=2,
+                    timeout=10,
+                    stop_requested=stop_requested,
+                )
+                if folder is not None:
+                    # Even successful startup probes are observation-only in the ledger.
+                    ingest(store, folder, recovery=True)
+                    report["startup_attempts"] += 1
+                    report["startup_samples"] += summary["samples"]
+                    report["samples"] += summary["samples"]
+                    report["excel_reads"] += summary["excel_reads"]
+                    report["attention_samples"] += summary["attention_samples"]
+                    report["last_run_id"] = folder.name
+                    report["last_observation"] = summary
+                    refresh_paper()
+                if stop_requested():
+                    return False
+                if folder is None:
+                    raise ValueError("observer_returned_no_samples")
+                decision = assess_startup(folder, code, aware_utc(utcnow()))
+                state = decision["state"]
+                report.update(
+                    startup_status=state,
+                    startup_issues=decision["issues"],
+                    phase="capturing" if state == "ready" else state,
+                )
+                if state == "blocked":
+                    report["stop_reason"] = "startup_check_failed"
+                # Waiting probes are also durable and periodically published.
+                if (
+                    state != "waiting_for_current_date"
+                    or report["startup_attempts"] % export_every == 0
+                ):
+                    report["export"] = store.export()
+                persist()
+                if progress and state != last_state:
+                    progress(
+                        {
+                            "status": report["status"],
+                            "phase": report["phase"],
+                            "startup_issues": report["startup_issues"],
+                            "retry_after_seconds": 30
+                            if state == "waiting_for_current_date"
+                            else None,
+                            "scheduled_stop_at": report["scheduled_stop_at"],
+                            "real_execution_enabled": False,
+                        }
+                    )
+                last_state = state
+                if state != "waiting_for_current_date":
+                    return state == "ready"
+                # Poll STOP/deadline during the delay, including after a sleeping PC resumes.
+                remaining = 30.0
+                while remaining > 0 and not stop_requested():
+                    step = min(0.2, remaining)
+                    sleeper(step)
+                    remaining -= step
+            return False
+
         try:
             ledger = PaperLedger(root / "paper.sqlite", code) if paper else None
             refresh_paper()
@@ -200,7 +274,8 @@ def run(
                     report["stop_reason"] = "postprocessing_complete"
                 else:
                     try:
-                        while not stop_requested():
+                        ready = not wait_for_current_date or await_current_date(store)
+                        while ready and not stop_requested():
                             folder, summary = observer(
                                 workbook,
                                 code,
@@ -250,6 +325,8 @@ def run(
             if audit_errors or coverage_errors:
                 raise ValueError("rss_saved_data_inconsistent")
             refresh_paper()
+            if report["startup_status"] == "blocked":
+                raise ValueError("rss_startup_check_failed")
             finished = aware_utc(utcnow())
             report.update(
                 status="stopped",
@@ -294,6 +371,11 @@ def main(argv=None):
     )
     parser.add_argument(
         "--recover-only", action="store_true", help="Offline recovery/export; no Excel reads"
+    )
+    parser.add_argument(
+        "--wait-for-current-date",
+        action="store_true",
+        help="Keep prior-date-only startup probes as warnings and retry until ready or stopped",
     )
     args = parser.parse_args(argv)
     try:

@@ -61,12 +61,6 @@ try {
     $confirmed = & (Join-Path $PSScriptRoot 'confirm_rss_start.ps1') -WorkbookPath $rssWorkbook
     if ($confirmed -ne $true) { Write-Host '開始を取り消しました。'; return }
     if (Test-RssLateStart) { Invoke-RssPostprocessing; return }
-    Write-Host '読取検査中です（接続状態や株価鮮度の保証ではありません）。'
-    & $rssPython -m trading_system.data_sources.rss_live --workbook $rssWorkbook --code 7203.T --output-root (Join-Path $rssProject 'data\rss-start-checks') --samples 3 --interval 2 --timeout 10
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host '読取検査に失敗しました。対象Excelと接続状態を確認して再度開始してください。取得は開始しません。' -ForegroundColor Red
-        return
-    }
     if (Test-Path -LiteralPath $rssStop) {
         if ((Get-Item -LiteralPath $rssStop).LastWriteTimeUtc -ge $checkStarted) {
             Write-Host '確認中に新しい停止要求が届いたため開始しません。' -ForegroundColor Yellow
@@ -77,12 +71,15 @@ try {
     Write-Host 'RSS常時取得・仮想取引の動作確認（実発注なし）' -ForegroundColor Cyan
     Write-Host 'マーケットスピードIIにログインし、Excelを「接続中・発注不可」にしてください。'
     Write-Host '対象7203.T。約2秒の待機を挟んで読み取ります。実際の間隔には読取時間が加わります。'
+    Write-Host '開始前に3件を検査します。日付が前日以前の場合は30秒ごとに再確認し、当日データを待ちます。'
+    Write-Host '当日データが3件続けて検査を通ると自動で取得へ進みます。待機中も停止ボタンは有効です。'
+    Write-Host '日付以外の読取異常や未来の日付では開始を中止します。接続状態や厳密な鮮度の保証ではありません。'
     Write-Host '日本時間16:00に取得を止め、保存・照合して終了します。保存中は画面を閉じずにお待ちください。'
     Write-Host 'PCのスリープ中は処理できません。16時を過ぎて復帰した場合は、取得を再開せず保存して停止します。'
     Write-Host '仮想取引は固定シナリオ1往復だけ。完了後も株価取得を継続します。'
     Write-Host '停止はデスクトップの「RSS常時取得を停止」、またはCtrl+Cを使用してください。'
     Write-Host ('状態・保存先: ' + $rssData)
-    & $rssPython -m trading_system.rss_continuous --workbook $rssWorkbook --code 7203.T --root $rssData --paper --cycles $Cycles
+    & $rssPython -m trading_system.rss_continuous --workbook $rssWorkbook --code 7203.T --root $rssData --paper --cycles $Cycles --wait-for-current-date
     if ($LASTEXITCODE -ne 0) { Write-Host '終了状態を確認してください。二重起動時は既存の取得が優先されます。' -ForegroundColor Yellow }
     else { Write-Host '保存・照合を終えて停止しました。' -ForegroundColor Green }
 } finally { Pop-Location }
