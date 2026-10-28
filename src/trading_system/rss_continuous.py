@@ -15,7 +15,7 @@ from trading_system.data_sources.rss_live import observe
 from trading_system.monitoring.rss import audit, audit_runs
 from trading_system.paper_rss import PaperLedger
 from trading_system.point_in_time.policy import aware_utc
-from trading_system.rss_startup import assess_startup
+from trading_system.rss_startup import WAITING_STATES, assess_startup
 from trading_system.runtime.models import daytime_deadline
 from trading_system.storage.rss import RSSStore
 from trading_system.storage.store import atomic_write, canonical
@@ -192,7 +192,7 @@ def run(
                     }
                 )
 
-        def await_current_date(store):
+        def await_startup(store):
             report.update(phase="checking_startup", startup_status="checking")
             persist()
             last_state = None
@@ -223,6 +223,7 @@ def run(
                     raise ValueError("observer_returned_no_samples")
                 decision = assess_startup(folder, code, aware_utc(utcnow()))
                 state = decision["state"]
+                waiting = state in WAITING_STATES
                 report.update(
                     startup_status=state,
                     startup_issues=decision["issues"],
@@ -231,10 +232,7 @@ def run(
                 if state == "blocked":
                     report["stop_reason"] = "startup_check_failed"
                 # Waiting probes are also durable and periodically published.
-                if (
-                    state != "waiting_for_current_date"
-                    or report["startup_attempts"] % export_every == 0
-                ):
+                if not waiting or report["startup_attempts"] % export_every == 0:
                     report["export"] = store.export()
                 persist()
                 if progress and state != last_state:
@@ -243,15 +241,13 @@ def run(
                             "status": report["status"],
                             "phase": report["phase"],
                             "startup_issues": report["startup_issues"],
-                            "retry_after_seconds": 30
-                            if state == "waiting_for_current_date"
-                            else None,
+                            "retry_after_seconds": 30 if waiting else None,
                             "scheduled_stop_at": report["scheduled_stop_at"],
                             "real_execution_enabled": False,
                         }
                     )
                 last_state = state
-                if state != "waiting_for_current_date":
+                if not waiting:
                     return state == "ready"
                 # Poll STOP/deadline during the delay, including after a sleeping PC resumes.
                 remaining = 30.0
@@ -274,7 +270,7 @@ def run(
                     report["stop_reason"] = "postprocessing_complete"
                 else:
                     try:
-                        ready = not wait_for_current_date or await_current_date(store)
+                        ready = not wait_for_current_date or await_startup(store)
                         while ready and not stop_requested():
                             folder, summary = observer(
                                 workbook,
@@ -375,7 +371,7 @@ def main(argv=None):
     parser.add_argument(
         "--wait-for-current-date",
         action="store_true",
-        help="Keep prior-date-only startup probes as warnings and retry until ready or stopped",
+        help="Wait for current valid startup quotes; retain prior-date/empty-quote warnings",
     )
     args = parser.parse_args(argv)
     try:

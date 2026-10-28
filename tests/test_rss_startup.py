@@ -41,6 +41,8 @@ class Feed:
             value[key][2] = day.strftime("%Y/%m/%d")
             if kind == "bad_price":
                 value[key][0] = "not a price"
+            elif kind == "empty_quote":
+                value[key][:2] = [0, "  :  :  "]
         return value
 
     def observe(self, workbook, code, runs, **kwargs):
@@ -107,11 +109,12 @@ def test_mixed_dates_require_a_fully_current_batch(tmp_path):
     assert result["startup_samples"] == 6 and result["samples"] == 11
 
 
-def test_stop_button_during_wait_saves_without_any_fill(tmp_path):
-    feed = Feed(["past"] * 3)
+@pytest.mark.parametrize("kind", ["past", "empty_quote"])
+def test_stop_button_during_wait_saves_without_any_fill(tmp_path, kind):
+    feed = Feed([kind] * 3)
 
     def stop(event):
-        if event["phase"] == "waiting_for_current_date":
+        if event["phase"].startswith("waiting_for_"):
             (tmp_path / "STOP").touch()
 
     result = feed.run(tmp_path, progress=stop)
@@ -120,20 +123,22 @@ def test_stop_button_during_wait_saves_without_any_fill(tmp_path):
     assert result["cycles_completed"] == 0 and result["paper"]["state"]["fills"] == 0
 
 
-def test_1600_during_wait_does_not_start_another_read(tmp_path):
-    feed = Feed(["past"] * 3, datetime(2026, 1, 5, 6, 59, 50, tzinfo=UTC))
+@pytest.mark.parametrize("kind", ["past", "empty_quote"])
+def test_1600_during_wait_does_not_start_another_read(tmp_path, kind):
+    feed = Feed([kind] * 3, datetime(2026, 1, 5, 6, 59, 50, tzinfo=UTC))
     result = feed.run(tmp_path)
     assert result["stop_reason"] == "daytime_1600" and result["normal_exit"]
     assert result["samples"] == 3 and result["cycles_completed"] == 0
     assert result["paper"]["state"]["fills"] == 0
 
 
-def test_sleep_until_next_day_keeps_original_deadline(tmp_path):
-    feed = Feed(["past"] * 3)
+@pytest.mark.parametrize("kind", ["past", "empty_quote"])
+def test_sleep_until_next_day_keeps_original_deadline(tmp_path, kind):
+    feed = Feed([kind] * 3)
 
     def sleep_hook():
         saved = json.loads((tmp_path / "status.json").read_bytes())
-        if saved["phase"] == "waiting_for_current_date":
+        if saved["phase"].startswith("waiting_for_"):
             feed.now += timedelta(days=1)
 
     feed.sleep_hook = sleep_hook
@@ -182,12 +187,13 @@ def test_wait_holds_single_writer_lock(tmp_path):
     assert Feed(["past"] * 3).run(tmp_path, progress=progress)["normal_exit"]
 
 
-def test_keyboard_interrupt_while_waiting_flushes_and_exits(tmp_path):
+@pytest.mark.parametrize("kind", ["past", "empty_quote"])
+def test_keyboard_interrupt_while_waiting_flushes_and_exits(tmp_path, kind):
     def interrupt(event):
-        if event["phase"] == "waiting_for_current_date":
+        if event["phase"].startswith("waiting_for_"):
             raise KeyboardInterrupt
 
-    result = Feed(["past"] * 3).run(tmp_path, progress=interrupt)
+    result = Feed([kind] * 3).run(tmp_path, progress=interrupt)
     assert result["stop_reason"] == "keyboard_interrupt" and result["normal_exit"]
     assert result["coverage"]["unimported_samples"] == 0
     assert result["paper"]["state"]["fills"] == 0
@@ -254,3 +260,97 @@ def test_cli_enables_startup_gate(tmp_path, monkeypatch, capsys):
     )
     assert code == 2 and received["wait_for_current_date"] is True
     assert json.loads(capsys.readouterr().out)["normal_exit"] is False
+
+
+def test_prior_date_then_empty_quote_then_valid_batch_releases_capture(tmp_path):
+    feed = Feed(
+        ["past"] * 3 + ["empty_quote"] * 3 + ["empty_quote", "today", "today"] + ["today"] * 8
+    )
+    events = []
+
+    def progress(event):
+        if event["status"] == "running":
+            saved = json.loads((tmp_path / "status.json").read_bytes())
+            events.append((event["phase"], event["retry_after_seconds"]))
+            assert saved["paper"]["state"]["fills"] == 0
+
+    result = feed.run(tmp_path, progress=progress)
+    assert events == [
+        ("waiting_for_current_date", 30),
+        ("waiting_for_quote", 30),
+        ("capturing", None),
+    ]
+    assert result["startup_attempts"] == 4 and result["startup_samples"] == 12
+    assert result["startup_status"] == "ready" and result["normal_exit"]
+    assert result["attention_samples"] == 7
+    assert result["samples"] == result["audit"]["observations"] == 17
+    assert result["coverage"]["unimported_samples"] == 0
+    assert not result["real_execution_enabled"] and not result["freshness_verified"]
+    for next_batch in (3, 6, 9):
+        assert (
+            feed.reads[next_batch][0] - feed.reads[next_batch - 1][0]
+        ).total_seconds() == pytest.approx(30)
+    records = [
+        json.loads(p.read_bytes()) for p in (tmp_path / "runs").glob("*/[0-9][0-9][0-9].json")
+    ]
+    empty = [r for r in records if r["issues"] == ["invalid_price", "invalid_quote_time"]]
+    assert len(empty) == 4
+    assert all(
+        r["status"] == "attention_required" and r["normalized"]["price"] is None for r in empty
+    )
+
+
+@pytest.mark.parametrize(
+    ("price", "clock", "expected"),
+    [
+        (0, "  :  :  ", "waiting_for_quote"),
+        (0.0, "::", "waiting_for_quote"),
+        (0, "09:00:00", "blocked"),
+        (1, "  :  :  ", "blocked"),
+        (-1, "  :  :  ", "blocked"),
+        (False, "  :  :  ", "blocked"),
+        ("0", "  :  :  ", "blocked"),
+        (None, "  :  :  ", "blocked"),
+        (0, "bad time", "blocked"),
+        (0, "  :00:  ", "blocked"),
+    ],
+)
+def test_only_observed_empty_quote_pattern_can_wait(tmp_path, price, clock, expected):
+    feed = Feed(["empty_quote"] * 3)
+    folder, _ = feed.observe(tmp_path / "x.xlsx", CODE, tmp_path, samples=3)
+    for path in folder.glob("[0-9][0-9][0-9].json"):
+        record = json.loads(path.read_bytes())
+        for key in ("values_before", "values_after"):
+            record["raw"][key][:2] = [price, clock]
+        # Saved success flags must not override the raw pattern.
+        record.update(status="observed", issues=[], freshness_verified=True)
+        path.write_text(json.dumps(record), encoding="utf-8")
+    assert assess_startup(folder, CODE, feed.now)["state"] == expected
+
+
+@pytest.mark.parametrize("fault", ["future", "past", "formula", "changing", "code", "invalid_date"])
+def test_empty_quote_does_not_hide_other_failures(tmp_path, fault):
+    feed = Feed(["empty_quote"] * 3)
+    folder, _ = feed.observe(tmp_path / "x.xlsx", CODE, tmp_path, samples=3)
+    path = folder / "001.json"
+    record = json.loads(path.read_bytes())
+    if fault in {"future", "past", "invalid_date"}:
+        delta = 1 if fault == "future" else -1
+        day = (feed.now.astimezone(JST).date() + timedelta(days=delta)).strftime("%Y/%m/%d")
+        for key in ("values_before", "values_after"):
+            record["raw"][key][2] = "not a date" if fault == "invalid_date" else day
+    elif fault == "formula":
+        record["raw"]["formulas_before"][0] = "=1"
+    elif fault == "changing":
+        record["raw"]["values_before"][0] = 100
+    else:
+        record["code"] = "9999.T"
+    path.write_text(json.dumps(record), encoding="utf-8")
+    assert assess_startup(folder, CODE, feed.now)["state"] == "blocked"
+
+
+def test_empty_quote_from_previous_capture_day_is_not_current(tmp_path):
+    feed = Feed(["empty_quote"] * 3)
+    folder, _ = feed.observe(tmp_path / "x.xlsx", CODE, tmp_path, samples=3)
+    result = assess_startup(folder, CODE, feed.now + timedelta(days=1))
+    assert result["state"] == "blocked" and "startup_date_changed" in result["issues"]
