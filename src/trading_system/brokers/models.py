@@ -177,10 +177,22 @@ class Costs(ContractInput):
 class Connection(ContractInput):
     account: Account
     state: Literal[
-        "offline", "paper_ready", "reconciliation_required", "disabled", "not_implemented"
+        "offline",
+        "paper_ready",
+        "reconciliation_required",
+        "disabled",
+        "not_implemented",
+        "connecting",
+        "read_only_ready",
+        "reconnecting",
+        "waiting_for_data",
+        "auth_required",
+        "stopped",
+        "error",
     ]
     real_execution_enabled: Literal[False] = False
     live_verified: Literal[False] = False
+    market_data_verified: StrictBool = False
 
 
 class SessionWindow(ContractInput):

@@ -63,14 +63,18 @@ def load_config(path: Path):
     return Config.model_validate(tomllib.loads(path.read_text(encoding="utf-8-sig")))
 
 
-def vendor_adapter(account, *, enabled=False):
+def vendor_adapter(account, *, enabled=False, market_data_client=None):
     # Lazy imports keep platform-specific implementations outside the common core.
+    if market_data_client is not None and account.broker != "mufg_esmart":
+        raise Unavailable("market_data", "not_implemented")
     if account.broker == "rakuten":
         from trading_system.brokers.rakuten.adapter import Adapter
     elif account.broker == "tachibana":
         from trading_system.brokers.tachibana.adapter import Adapter
     else:
         from trading_system.brokers.mufg_esmart.adapter import Adapter
+    if market_data_client is not None:
+        return Adapter(account, enabled=enabled, market_data_client=market_data_client)
     return Adapter(account, enabled=enabled)
 
 
