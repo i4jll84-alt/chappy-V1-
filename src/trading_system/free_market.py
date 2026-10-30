@@ -368,7 +368,7 @@ def due_slot(moment):
     if moment.tzinfo is None:
         raise ValueError("aware_schedule_time_required")
     local = moment.astimezone(ZoneInfo("Asia/Tokyo"))
-    slot = local.replace(hour=18, minute=30, second=0, microsecond=0)
+    slot = local.replace(hour=8, minute=0, second=0, microsecond=0)
     if local < slot:
         slot -= timedelta(days=1)
     while slot.weekday() >= 5:
@@ -390,7 +390,7 @@ def schedule_decision(root, moment=None):
             tzinfo=UTC
         )
         completed = datetime.fromisoformat(report["checked_at"])
-        # A run that started before release time must not satisfy today's slot.
+        # A run that started before the scheduled time must not satisfy today's slot.
         if slot <= started <= completed <= moment:
             return {**result, "state": "already_acquired", "successful_run": report["run"]}
     return result
@@ -402,7 +402,7 @@ def main():
     parser.add_argument(
         "--due",
         action="store_true",
-        help="Fetch only if the latest weekday 18:30 JST slot is unfulfilled.",
+        help="Fetch only if the latest weekday 08:00 JST slot is unfulfilled.",
     )
     args = parser.parse_args()
     args.root.mkdir(parents=True, exist_ok=True)

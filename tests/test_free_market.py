@@ -149,12 +149,12 @@ def test_throttling_stops_remaining_requests(tmp_path):
 @pytest.mark.parametrize(
     ("current", "expected"),
     [
-        ("2026-11-02T18:29:59+09:00", "2026-10-30T18:30:00+09:00"),
-        ("2026-11-02T18:30:00+09:00", "2026-11-02T18:30:00+09:00"),
-        ("2026-11-02T21:10:00+09:00", "2026-11-02T18:30:00+09:00"),
-        ("2026-11-03T02:10:00+09:00", "2026-11-02T18:30:00+09:00"),
-        ("2026-10-31T21:10:00+09:00", "2026-10-30T18:30:00+09:00"),
-        ("2026-11-01T08:10:00+09:00", "2026-10-30T18:30:00+09:00"),
+        ("2026-11-02T07:59:59+09:00", "2026-10-30T08:00:00+09:00"),
+        ("2026-11-02T08:00:00+09:00", "2026-11-02T08:00:00+09:00"),
+        ("2026-11-02T21:10:00+09:00", "2026-11-02T08:00:00+09:00"),
+        ("2026-11-03T02:10:00+09:00", "2026-11-02T08:00:00+09:00"),
+        ("2026-10-31T21:10:00+09:00", "2026-10-30T08:00:00+09:00"),
+        ("2026-11-01T08:10:00+09:00", "2026-10-30T08:00:00+09:00"),
     ],
 )
 def test_due_slot_includes_late_start_and_weekends(current, expected):
@@ -180,11 +180,11 @@ def test_schedule_requires_successful_run_after_release(tmp_path):
         )
 
     assert schedule_decision(tmp_path, moment)["state"] == "due"
-    save("20261102T092900-abcd", "checked", "2026-11-02T09:40:00+00:00")
+    save("20261101T225900-abcd", "checked", "2026-11-01T23:10:00+00:00")
     assert schedule_decision(tmp_path, moment)["state"] == "due"
-    save("20261102T100000-abcd", "issues_found", "2026-11-02T10:10:00+00:00")
+    save("20261101T233000-abcd", "issues_found", "2026-11-01T23:40:00+00:00")
     assert schedule_decision(tmp_path, moment)["state"] == "due"
-    save("20261102T100000-abcd", "checked", "2026-11-02T10:10:00+00:00")
+    save("20261101T233000-abcd", "checked", "2026-11-01T23:40:00+00:00")
     assert schedule_decision(tmp_path, moment)["state"] == "already_acquired"
     (tmp_path / "STOP").touch()
     assert schedule_decision(tmp_path, moment)["state"] == "stopped"
