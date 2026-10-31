@@ -199,3 +199,60 @@ def test_scheduled_cli_skips_when_another_writer_is_active(tmp_path, monkeypatch
         assert main() == 0
     assert json.loads(capsys.readouterr().out)["state"] == "already_running"
     assert not (tmp_path / "public.sqlite").exists()
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "folder/18_kenri1610.pdf",
+        "folder/17_idou2610.pdf",
+        "folder/13_kabusu2609.pdf",
+        "folder/17_kenri2609-correction.pdf",
+        "index.html",
+        "00-archives-10.html",
+    ],
+)
+def test_monthly_required_sources(name):
+    url = "https://www.jpx.co.jp/markets/statistics-equities/monthly/" + name
+    assert public_url(url) == url
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "folder/18_kenri1609.pdf",
+        "folder/18_kenri2613.pdf",
+        "folder/01_sokatu2601.pdf",
+        "folder/17_kenri2610.exe",
+        "other.html",
+        "../outside/18_kenri2610.pdf",
+    ],
+)
+def test_monthly_does_not_expand_into_unrelated_or_earlier_data(name):
+    url = "https://www.jpx.co.jp/markets/statistics-equities/monthly/" + name
+    with pytest.raises(ValueError, match="public_url_not_allowed"):
+        public_url(url)
+
+
+def test_monthly_follows_published_selected_attachments_and_archives_only():
+    root = "https://www.jpx.co.jp/markets/statistics-equities/monthly/"
+    _, links = interpret(
+        root + "index.html",
+        b"""
+      <option value="00-archives-10.html">2016</option>
+      <a href="folder/17_kenri2609.pdf">rights</a>
+      <a href="folder/16_idou2609.pdf">changes</a>
+      <a href="folder/13_kabusu2609.pdf">shares</a>
+      <a href="folder/01_sokatu2609.pdf">other</a>
+      <a href="folder/18_kenri1609.pdf">before requested history</a>
+    """,
+    )
+    assert set(links) == {
+        root + x
+        for x in (
+            "00-archives-10.html",
+            "folder/17_kenri2609.pdf",
+            "folder/16_idou2609.pdf",
+            "folder/13_kabusu2609.pdf",
+        )
+    }

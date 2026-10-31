@@ -30,6 +30,7 @@ JPX = "https://www.jpx.co.jp"
 JSF = "https://www.taisyaku.jp"
 JPX_AREAS = ("rights", "ss-reg", "margin-reg", "suspended")
 JSF_FILES = ("meigara", "zandaka", "shina", "seigenichiran")
+MONTHLY_PATH = "/markets/statistics-equities/monthly/"
 SEEDS = (
     *(f"{JSF}/data/{name}.csv" for name in JSF_FILES),
     f"{JSF}/download/",
@@ -39,8 +40,25 @@ SEEDS = (
     f"{JPX}/markets/equities/rights/01.html",
     f"{JPX}/markets/equities/margin-reg/01.html",
     f"{JPX}/markets/equities/margin-reg/02.html",
+    f"{JPX}{MONTHLY_PATH}index.html",
 )
 SUFFIXES = (".csv", ".xls", ".xlsx", ".pdf")
+
+
+def monthly_source(path):
+    """Only published archive pages and the three required monthly datasets."""
+    if not path.startswith(MONTHLY_PATH):
+        return False
+    relative = path[len(MONTHLY_PATH) :]
+    if re.fullmatch(r"(?:index|00-archives-[0-9]+)\.html", relative):
+        return True
+    match = re.fullmatch(
+        r"[^/]+/[0-9]+_(?:kenri|idou|kabusu)([0-9]{2})([0-9]{2})[^/]*\.pdf", relative
+    )
+    if not match:
+        return False
+    year, month = 2000 + int(match[1]), int(match[2])
+    return 1 <= month <= 12 and (year, month) >= (2016, 10)
 
 
 def public_url(value):
@@ -58,7 +76,9 @@ def public_url(value):
         raise ValueError("public_url_not_allowed")
     allowed = False
     if parts.hostname == "www.jpx.co.jp":
-        allowed = any(parts.path.startswith(f"/markets/equities/{a}/") for a in JPX_AREAS)
+        allowed = monthly_source(parts.path) or any(
+            parts.path.startswith(f"/markets/equities/{a}/") for a in JPX_AREAS
+        )
     elif parts.hostname == "www.taisyaku.jp":
         allowed = parts.path in {
             "/download/",
