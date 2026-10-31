@@ -4,6 +4,7 @@
     [int]$Cycles = 0
 )
 $ErrorActionPreference = 'Stop'
+$startRequested = [datetime]::UtcNow
 $rssProject = Split-Path -Parent $PSScriptRoot
 $rssPython = Join-Path $rssProject '.venv\Scripts\python.exe'
 $rssWorkbook = Join-Path $env:USERPROFILE 'Documents\RakutenRSS\RSS接続確認.xlsx'
@@ -57,13 +58,9 @@ try {
     }
     if (Test-RssLateStart) { Invoke-RssPostprocessing; return }
     if (-not (Test-Path -LiteralPath $rssWorkbook -PathType Leaf)) { throw 'RSS接続確認.xlsxが見つかりません。' }
-    $checkStarted = [datetime]::UtcNow
-    $confirmed = & (Join-Path $PSScriptRoot 'confirm_rss_start.ps1') -WorkbookPath $rssWorkbook
-    if ($confirmed -ne $true) { Write-Host '開始を取り消しました。'; return }
-    if (Test-RssLateStart) { Invoke-RssPostprocessing; return }
     if (Test-Path -LiteralPath $rssStop) {
-        if ((Get-Item -LiteralPath $rssStop).LastWriteTimeUtc -ge $checkStarted) {
-            Write-Host '確認中に新しい停止要求が届いたため開始しません。' -ForegroundColor Yellow
+        if ((Get-Item -LiteralPath $rssStop).LastWriteTimeUtc -ge $startRequested) {
+            Write-Host '起動中に新しい停止要求が届いたため開始しません。' -ForegroundColor Yellow
             return
         }
         Remove-Item -LiteralPath $rssStop
@@ -78,7 +75,7 @@ try {
     Write-Host '日本時間16:00に取得を止め、保存・照合して終了します。保存中は画面を閉じずにお待ちください。'
     Write-Host 'PCのスリープ中は処理できません。16時を過ぎて復帰した場合は、取得を再開せず保存して停止します。'
     Write-Host '仮想取引は固定シナリオ1往復だけ。完了後も株価取得を継続します。'
-    Write-Host '停止はデスクトップの「RSS常時取得を停止」、またはCtrl+Cを使用してください。'
+    Write-Host '停止は共通起動画面の「両方の取得を停止」、またはCtrl+Cを使用してください。'
     Write-Host ('状態・保存先: ' + $rssData)
     & $rssPython -m trading_system.rss_continuous --workbook $rssWorkbook --code 7203.T --root $rssData --paper --cycles $Cycles --wait-for-current-date
     if ($LASTEXITCODE -ne 0) { Write-Host '終了状態を確認してください。二重起動時は既存の取得が優先されます。' -ForegroundColor Yellow }

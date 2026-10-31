@@ -297,7 +297,7 @@ class Launcher:
                     creationflags=subprocess.CREATE_NEW_CONSOLE,
                 )
             self.message.set(
-                "起動しました。楽天の確認画面・カブコムの入力画面で操作を続けてください。"
+                "起動しました。楽天は自動でデータを検査します。カブコムは入力画面で操作を続けてください。"
             )
         except (OSError, ValueError):
             messagebox.showerror(
