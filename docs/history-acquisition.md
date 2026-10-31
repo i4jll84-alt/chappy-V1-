@@ -274,3 +274,14 @@ Ruff check / format check（190ファイル）成功。
 - [JPX権利処理](https://www.jpx.co.jp/markets/equities/rights/index.html)、[空売り規制](https://www.jpx.co.jp/markets/equities/ss-reg/index.html)、[信用規制](https://www.jpx.co.jp/markets/equities/margin-reg/index.html)
 - [Yahoo日本版時系列](https://finance.yahoo.co.jp/quote/7203.T/history)、[米国版ダウンロードヘルプ](https://help.yahoo.com/kb/finance-for-web/download-historical-data-yahoo-finance-sln2311.html)
 
+
+## 2026-10-31 取得後の権利・費用・情報時点の整備
+
+取得済みアーカイブから、権利2,486件・単元変更374件・財務開示192,082行と
+日証金731営業日・3,454,947行の観測入力を作成した。原本は未変更。
+日証金の公式解説等4ページを追加保存し、日数込みの料率と「発生なし」の意味を確認。
+整備一式の利用可能時刻は全入力と整備完了+1秒より早くならない。
+現在取得した過去データを、当時保存済みの履歴とは扱わない。
+全件照合で差0、2回生成した出力6ファイルのハッシュ一致。整備処理は不足ありの終了コード3。
+データ本体は data/historical-inputs/ に保存しGit対象外。
+仕様・制約・残作業は [実データ入力整備](historical-inputs.md) を参照。
