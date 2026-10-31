@@ -36,6 +36,19 @@ from trading_system.storage.store import canonical
 
 VERSION = "historical_observations_v2"
 SUPPORTED_VERSIONS = {"historical_observations_v1", VERSION}
+BUNDLE_ARTIFACTS = frozenset(
+    {
+        "rights.json",
+        "lot-changes.json",
+        "rights-matches.json",
+        "lineage.json",
+        "dividend-disclosures.parquet",
+        "reverse-fees.parquet",
+    }
+)
+BULK_ENDPOINTS = frozenset(
+    {"/equities/bars/daily", "/equities/master", "/fins/summary", "/markets/calendar"}
+)
 CODE = r"[0-9][0-9A-Z][0-9][0-9A-Z](?:[0-9])?"
 RIGHT = re.compile(
     rf"(?<![0-9A-Z])({CODE})\s+.*?(\d{{4}}\.\d{{2}}\.\d{{2}})\s+"
@@ -614,20 +627,115 @@ def prepare(*, research, public, history, jsf, fee_policy, output, start, end):
         raise
 
 
+def _verify_records(records, *, root=None):
+    """Reject missing, repeated or changed pinned files, including source files."""
+    kind = "artifact" if root is not None else "source"
+    if not isinstance(records, list) or not records:
+        raise ValueError(f"bundle_{kind}_records_required")
+    seen = set()
+    for item in records:
+        name = item["path"]
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"bundle_{kind}_path_invalid")
+        path = safe_path(root, name) if root is not None else Path(name)
+        if root is None and not path.is_absolute():
+            raise ValueError("bundle_source_path_not_absolute")
+        path = path.resolve()
+        if path in seen:
+            raise ValueError(f"bundle_duplicate_{kind}")
+        seen.add(path)
+        if type(item["bytes"]) is not int or item["bytes"] < 0:
+            raise ValueError(f"bundle_{kind}_size_invalid")
+        if not isinstance(item["sha256"], str) or not re.fullmatch("[0-9a-f]{64}", item["sha256"]):
+            raise ValueError(f"bundle_{kind}_hash_invalid")
+        if not path.is_file() or path.stat().st_size != item["bytes"]:
+            raise ValueError(f"bundle_{kind}_size_or_hash_mismatch")
+        if sha_file(path) != item["sha256"]:
+            raise ValueError(f"bundle_{kind}_hash_mismatch")
+
+
+def _lineage_evidence(lineage):
+    if set(lineage) != {"monthly", "bulk", "jsf", "fee_policy"}:
+        raise ValueError("bundle_lineage_groups_incomplete")
+    if not isinstance(lineage["bulk"], dict) or set(lineage["bulk"]) != BULK_ENDPOINTS:
+        raise ValueError("bundle_bulk_endpoints_incomplete")
+    groups = [lineage["monthly"], lineage["jsf"], *lineage["bulk"].values()]
+    if any(not isinstance(group, list) or not group for group in groups):
+        raise ValueError("bundle_lineage_group_empty")
+    times = [evidence(lineage["fee_policy"])]
+    for group in groups:
+        for item in group:
+            stamp = evidence(item)
+            if item.get("source_available_at") is not None:
+                if timestamp(item["source_available_at"]) != stamp.usable_at:
+                    raise ValueError("bundle_source_availability_mismatch")
+            times.append(stamp)
+    return times
+
+
+def _verify_lineage_sources(lineage, sources):
+    """Every raw/normalized file referenced by lineage must have a verified pin."""
+    pinned = {item["sha256"] for item in sources}
+    required = {lineage["fee_policy"]["sha256"]}
+    required.update(item["sha256"] for item in lineage["monthly"])
+    for group in lineage["bulk"].values():
+        for item in group:
+            required.update((item["sha256"], item["parquet_sha256"]))
+    for item in lineage["jsf"]:
+        required.update((item["csv"]["sha256"], item["html"]["sha256"]))
+    if not required <= pinned:
+        raise ValueError("bundle_lineage_source_not_pinned")
+
+
 def verify_bundle(output, decision_at):
-    """Allow observation access after preparation; never assert execution readiness."""
+    """Verify all pinned files and input times before observation access.
+
+    The manifest is an integrity record, not a signature or trading permission.
+    A valid prepared bundle still has gaps and cannot enable historical execution.
+    """
     output = Path(output).resolve()
     if (output / "failure.json").exists():
         raise ValueError("preparation_failed")
-    report = json.loads((output / "manifest.json").read_bytes())
-    if report["version"] not in SUPPORTED_VERSIONS or report["state"] != "prepared_with_gaps":
-        raise ValueError("unsupported_bundle_state")
-    EvidenceTime(
-        timestamp(report["prepared_at"]), recorded_available_at=timestamp(report["available_at"])
-    ).require_known(decision_at)
-    for item in report["artifacts"]:
-        if sha_file(safe_path(output, item["path"])) != item["sha256"]:
-            raise ValueError("bundle_artifact_hash_mismatch")
+    try:
+        manifest_bytes = (output / "manifest.json").read_bytes()
+        report = json.loads(manifest_bytes)
+        if report["version"] not in SUPPORTED_VERSIONS or report["state"] != "prepared_with_gaps":
+            raise ValueError("unsupported_bundle_state")
+        if (
+            report["historical_backtest_ready"] is not False
+            or report["real_execution_enabled"] is not False
+        ):
+            raise ValueError("observation_bundle_cannot_enable_execution")
+        gaps = report["gaps"]
+        if (
+            not isinstance(gaps, list)
+            or not gaps
+            or any(not isinstance(g, str) or not g for g in gaps)
+        ):
+            raise ValueError("bundle_gaps_required")
+        if len(gaps) != len(set(gaps)):
+            raise ValueError("bundle_duplicate_gap")
+        prepared = timestamp(report["prepared_at"])
+        usable = timestamp(report["available_at"])
+        if prepared is None or usable is None:
+            raise ValueError("bundle_preparation_times_required")
+        EvidenceTime(prepared, recorded_available_at=usable).require_known(decision_at)
+        artifacts = report["artifacts"]
+        if not isinstance(artifacts, list) or {x["path"] for x in artifacts} != BUNDLE_ARTIFACTS:
+            raise ValueError("bundle_artifacts_incomplete")
+        _verify_records(artifacts, root=output)
+        lineage = json.loads((output / "lineage.json").read_bytes())
+        lower_bound = prepared_available_at(prepared, _lineage_evidence(lineage))
+        if usable < lower_bound:
+            raise ValueError("bundle_available_before_source_evidence")
+        _verify_records(report["sources"])
+        _verify_lineage_sources(lineage, report["sources"])
+        if (output / "failure.json").exists() or (
+            output / "manifest.json"
+        ).read_bytes() != manifest_bytes:
+            raise ValueError("bundle_changed_during_verification")
+    except (KeyError, TypeError, AttributeError, OSError) as exc:
+        raise ValueError("bundle_incomplete_or_unreadable") from exc
     return report
 
 

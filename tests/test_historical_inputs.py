@@ -380,3 +380,137 @@ def test_rights_without_numeric_ratio_are_preserved(label):
         )
         is None
     )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "empty_artifacts",
+        "missing_artifact",
+        "duplicate_artifact",
+        "wrong_size",
+        "empty_sources",
+        "missing_source_record",
+        "changed_source",
+        "backdated_bundle",
+        "future_source",
+        "missing_lineage_group",
+        "ready_flag",
+        "live_flag",
+        "empty_gaps",
+    ],
+)
+def test_bundle_reader_rejects_incomplete_or_inconsistent_evidence(fixture_archive, mutation):
+    report = prepare(**fixture_archive)
+    output = fixture_archive["output"]
+    at = datetime.fromisoformat(report["available_at"])
+    if mutation == "empty_artifacts":
+        report["artifacts"] = []
+    elif mutation == "missing_artifact":
+        report["artifacts"] = [x for x in report["artifacts"] if x["path"] != "rights.json"]
+        (output / "rights.json").unlink()
+    elif mutation == "duplicate_artifact":
+        report["artifacts"].append(report["artifacts"][0])
+    elif mutation == "wrong_size":
+        report["artifacts"][0]["bytes"] += 1
+    elif mutation == "empty_sources":
+        report["sources"] = []
+    elif mutation == "missing_source_record":
+        raw_hash = digest(fixture_archive["public"] / "kenri.pdf")
+        report["sources"] = [x for x in report["sources"] if x["sha256"] != raw_hash]
+    elif mutation == "changed_source":
+        (fixture_archive["public"] / "kenri.pdf").write_bytes(b"changed after preparation")
+    elif mutation == "backdated_bundle":
+        report["prepared_at"] = (NOW - timedelta(days=1)).isoformat()
+        report["available_at"] = (NOW - timedelta(days=1) + timedelta(seconds=1)).isoformat()
+        at = datetime.fromisoformat(report["available_at"])
+    elif mutation in {"future_source", "missing_lineage_group"}:
+        lineage = json.loads((output / "lineage.json").read_bytes())
+        if mutation == "future_source":
+            lineage["fee_policy"]["source_published_at"] = (at + timedelta(days=1)).isoformat()
+        else:
+            del lineage["bulk"]["/equities/master"]
+        dump(output / "lineage.json", lineage)
+        entry = next(x for x in report["artifacts"] if x["path"] == "lineage.json")
+        entry.update(
+            sha256=digest(output / "lineage.json"), bytes=(output / "lineage.json").stat().st_size
+        )
+    elif mutation == "ready_flag":
+        report["historical_backtest_ready"] = True
+    elif mutation == "live_flag":
+        report["real_execution_enabled"] = True
+    elif mutation == "empty_gaps":
+        report["gaps"] = []
+    dump(output / "manifest.json", report)
+    with pytest.raises(ValueError):
+        verify_bundle(output, at)
+
+
+def test_preflight_preserves_all_blockers_and_cannot_enable_trading(fixture_archive):
+    from trading_system.historical_preflight import inspect_bundle, main
+
+    report = prepare(**fixture_archive)
+    at = datetime.fromisoformat(report["available_at"])
+    result = inspect_bundle(fixture_archive["output"], at)
+    assert result["integrity_verified"]
+    assert result["gaps"] == report["gaps"]
+    assert result["artifacts_verified"] == 6
+    assert result["price_events"] == 1
+    assert not result["historical_backtest_ready"]
+    assert not result["real_execution_enabled"] and not result["market_performance_evaluated"]
+    out = fixture_archive["output"].parent / "check.json"
+    args = [
+        "--bundle",
+        str(fixture_archive["output"]),
+        "--decision-at",
+        at.isoformat(),
+        "--output",
+        str(out),
+    ]
+    assert main(args) == 3
+    before = out.read_bytes()
+    with pytest.raises(SystemExit):
+        main(args)
+    assert out.read_bytes() == before
+    args[-1] = str(fixture_archive["output"] / "check.json")
+    with pytest.raises(SystemExit):
+        main(args)
+    assert not (fixture_archive["output"] / "check.json").exists()
+
+
+def test_preflight_refuses_historical_use_and_records_failure(fixture_archive):
+    from trading_system.historical_preflight import main
+
+    prepare(**fixture_archive)
+    out = fixture_archive["output"].parent / "past-check.json"
+    assert (
+        main(
+            [
+                "--bundle",
+                str(fixture_archive["output"]),
+                "--decision-at",
+                "2020-01-02T07:00:00+00:00",
+                "--output",
+                str(out),
+            ]
+        )
+        == 1
+    )
+    result = json.loads(out.read_bytes())
+    assert result["state"] == "verification_failed"
+    assert "not_available" in result["error"]
+    assert not result["integrity_verified"] and not result["market_performance_evaluated"]
+
+
+@pytest.mark.parametrize("mutation", ["count", "states", "ordinary_states"])
+def test_preflight_refuses_inaccurate_rights_summary(fixture_archive, mutation):
+    from trading_system.historical_preflight import inspect_bundle
+
+    report = prepare(**fixture_archive)
+    if mutation == "count":
+        report["price_events"] += 1
+    else:
+        report["match_states" if mutation == "states" else "ordinary_match_states"] = {}
+    dump(fixture_archive["output"] / "manifest.json", report)
+    with pytest.raises(ValueError, match="summary_mismatch"):
+        inspect_bundle(fixture_archive["output"], datetime.fromisoformat(report["available_at"]))
