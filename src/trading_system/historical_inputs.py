@@ -34,12 +34,18 @@ from trading_system.history_audit import safe_path
 from trading_system.history_download import sha_file
 from trading_system.storage.store import canonical
 
-VERSION = "historical_observations_v1"
+VERSION = "historical_observations_v2"
+SUPPORTED_VERSIONS = {"historical_observations_v1", VERSION}
 CODE = r"[0-9][0-9A-Z][0-9][0-9A-Z](?:[0-9])?"
 RIGHT = re.compile(
     rf"(?<![0-9A-Z])({CODE})\s+.*?(\d{{4}}\.\d{{2}}\.\d{{2}})\s+"
     r"(\d{4}\.\d{2}\.\d{2})\s+([0-9,]+(?:\.\d+)?):([0-9,]+(?:\.\d+)?)\s*(\D.*)$"
 )
+RIGHT_WITHOUT_RATIO = re.compile(
+    rf"(?<![0-9A-Z])({CODE})\s+.*?(\d{{4}}\.\d{{2}}\.\d{{2}})\s+"
+    r"(\d{4}\.\d{2}\.\d{2})\s+(新株予約権(?:の株主|の)?無償割当て)\s*$"
+)
+
 LOT = re.compile(
     rf"(\d{{4}}\.\d{{2}}\.\d{{2}})\s+({CODE})\s+.*?"
     r"([0-9,]+)株\s*[（(]([0-9,]+)株[）)]"
@@ -150,18 +156,30 @@ def fraction_text(value):
 def parse_right(line, page, source_id, usable_at):
     match = RIGHT.search(line)
     if match is None:
-        return None
-    code, ex_day, record_day, before, after, label = match.groups()
+        match = RIGHT_WITHOUT_RATIO.search(line)
+        if match is None:
+            return None
+        code, ex_day, record_day, label = match.groups()
+        before = after = None
+    else:
+        code, ex_day, record_day, before, after, label = match.groups()
     ex_day = date.fromisoformat(ex_day.replace(".", "-")).isoformat()
     record_day = date.fromisoformat(record_day.replace(".", "-")).isoformat()
     if record_day < ex_day:
         raise ValueError("record_date_before_ex_date")
-    before, after = (Fraction(v.replace(",", "")) for v in (before, after))
-    if before <= 0 or after <= 0:
-        raise ValueError("positive_ratio_required")
+    if before is not None:
+        before, after = (Fraction(v.replace(",", "")) for v in (before, after))
+        if before <= 0 or after <= 0:
+            raise ValueError("positive_ratio_required")
     label = label.strip()
     kind = {"分割": "split", "株式分割": "split", "株式併合": "consolidation"}.get(label)
     ratio = SplitRatio(kind, before, after) if kind else None
+    if label.startswith("新株予約権"):
+        kind = "subscription_rights_allotment"
+    elif label == "株式無償割当て":
+        kind = "free_share_allotment"
+    elif label in {"株主割当", "株主割当て"}:
+        kind = "shareholder_subscription"
     return {
         "code": code if len(code) == 5 else code + "0",
         "ex_date": ex_day,
@@ -170,8 +188,9 @@ def parse_right(line, page, source_id, usable_at):
         "payment_date": None,
         "event_text": label,
         "kind": kind or "unsupported_allocation_or_product",
-        "ratio_before": fraction_text(before),
-        "ratio_after": fraction_text(after),
+        "ratio_before": fraction_text(before) if before is not None else None,
+        "ratio_after": fraction_text(after) if after is not None else None,
+        "ratio_stated": before is not None,
         "price_multiplier": fraction_text(ratio.price_multiplier) if ratio else None,
         "quantity_multiplier": fraction_text(ratio.quantity_multiplier) if ratio else None,
         "source_id": source_id,
@@ -550,6 +569,7 @@ def prepare(*, research, public, history, jsf, fee_policy, output, start, end):
             "prepared_at": completed.isoformat(),
             "available_at": prepared_available_at(completed, sources.times).isoformat(),
             "rights": len(rights),
+            "rights_without_stated_ratio": sum(not r["ratio_stated"] for r in rights),
             "rights_types": dict(Counter(r["kind"] for r in rights)),
             "price_events": len(matches),
             "match_states": dict(Counter(r["match_state"] for r in matches)),
@@ -600,7 +620,7 @@ def verify_bundle(output, decision_at):
     if (output / "failure.json").exists():
         raise ValueError("preparation_failed")
     report = json.loads((output / "manifest.json").read_bytes())
-    if report["version"] != VERSION or report["state"] != "prepared_with_gaps":
+    if report["version"] not in SUPPORTED_VERSIONS or report["state"] != "prepared_with_gaps":
         raise ValueError("unsupported_bundle_state")
     EvidenceTime(
         timestamp(report["prepared_at"]), recorded_available_at=timestamp(report["available_at"])

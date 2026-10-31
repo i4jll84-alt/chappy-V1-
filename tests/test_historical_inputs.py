@@ -113,7 +113,7 @@ def test_fractional_split_is_exact_and_special_rights_not_inferred():
             f"1234 A 2020.01.02 2020.01.03 {ratio} 株式無償割当て", 1, "x", META["available_at"]
         )
         assert special["price_multiplier"] is None
-        assert special["kind"] == "unsupported_allocation_or_product"
+        assert special["kind"] == "free_share_allotment"
     assert SplitRatio("consolidation", Fraction(5), Fraction(1)).price_multiplier == 5
     with pytest.raises(ValueError, match="direction"):
         SplitRatio("split", Fraction(5), Fraction(1))
@@ -363,3 +363,20 @@ def test_no_bulk_sources_is_not_success(tmp_path):
         db.execute("CREATE TABLE bulk_files(endpoint,object_key,modified,state)")
     with pytest.raises(ValueError, match="endpoint_missing"):
         archive_files(tmp_path, Sources())
+
+
+@pytest.mark.parametrize(
+    "label", ["新株予約権無償割当て", "新株予約権の無償割当て", "新株予約権の株主無償割当て"]
+)
+def test_rights_without_numeric_ratio_are_preserved(label):
+    row = parse_right(f"8737 A 2017.05.18 2017.05.22 {label}", 1, "source", META["available_at"])
+    assert row["kind"] == "subscription_rights_allotment"
+    assert row["ratio_before"] is None and row["ratio_after"] is None
+    assert not row["ratio_stated"]
+    assert row["price_multiplier"] is None and not row["usable_as_execution_action"]
+    assert (
+        parse_right(
+            "5721 A 2026.01.14 2026.01.15 臨時株主総会の議決権の行使", 1, "s", META["available_at"]
+        )
+        is None
+    )
