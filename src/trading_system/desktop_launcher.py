@@ -273,7 +273,12 @@ class Launcher:
             )
             return
         try:
-            os.startfile(path)
+            if name == "rakuten_app" and path.suffix.lower() == ".exe":
+                # MARKET SPEED II resolves Config/Localize from its working directory.
+                executable = path.absolute()
+                os.startfile(executable, cwd=executable.parent)
+            else:
+                os.startfile(path)
         except OSError:
             messagebox.showerror("アプリ", "アプリを開けません。設定の保存先を確認してください。")
 

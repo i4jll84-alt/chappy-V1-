@@ -44,6 +44,33 @@ def test_app_paths_are_not_arbitrary_commands(path):
         launcher.validate_settings({**settings(), "rakuten_app": path})
 
 
+@pytest.mark.parametrize(
+    "setting, filename, from_bin",
+    [
+        ("rakuten_app", "MarketSpeed2.exe", True),
+        ("rakuten_app", "MarketSpeed2.EXE", True),
+        ("rakuten_app", "MarketSpeed2.lnk", False),
+        ("mufg_app", "KabuS.exe", False),
+    ],
+)
+def test_vendor_launch_uses_rakuten_exe_directory_only(
+    tmp_path, monkeypatch, setting, filename, from_bin
+):
+    monkeypatch.chdir(tmp_path)
+    directory = Path("アプリ Bin")
+    directory.mkdir()
+    app = directory / filename
+    app.touch()
+    start = Mock()
+    monkeypatch.setattr(launcher.os, "startfile", start, raising=False)
+    launcher.Launcher.open_app(SimpleNamespace(settings={setting: str(app)}), setting)
+    if from_bin:
+        start.assert_called_once_with(app.absolute(), cwd=directory.absolute())
+    else:
+        start.assert_called_once_with(app)
+    assert Path.cwd() == tmp_path
+
+
 def test_commands_use_existing_bounded_collectors_and_fixed_local_roots(tmp_path):
     rss = launcher.launch_command(tmp_path, "rakuten")
     mufg = launcher.launch_command(tmp_path, "mufg_esmart")
