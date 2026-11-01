@@ -1,6 +1,7 @@
 """Deadline/recovery acceptance tests: fixed data and virtual clocks, no Excel/API."""
 
 import json
+import os
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -133,14 +134,51 @@ def test_recovery_crossing_cutoff_starts_no_capture(tmp_path, monkeypatch):
     clock = [datetime(2026, 1, 5, 6, 59, 59, tzinfo=UTC)]
     original = RSSStore.import_run
 
-    def slow_import(self, folder):
+    def slow_import(self, folder, **kwargs):
         clock[0] += timedelta(seconds=2)
-        return original(self, folder)
+        return original(self, folder, **kwargs)
 
     monkeypatch.setattr(RSSStore, "import_run", slow_import)
     result = execute(tmp_path, clock, observer=forbidden)
     assert result["recovered_samples"] == 1 and result["samples"] == 0
     assert result["stop_reason"] == "daytime_1600" and result["normal_exit"]
+
+
+@pytest.mark.parametrize("remove_after_ack", [False, True])
+def test_stop_during_recovery_shows_progress_and_finishes_every_run(
+    tmp_path, monkeypatch, remove_after_ack
+):
+    for number in range(3):
+        folder = tmp_path / "runs" / f"{number:032x}"
+        folder.mkdir(parents=True)
+        (folder / "000.json").write_bytes(body())
+
+    before = []
+    original = RSSStore.import_run
+
+    def request_stop_once(store, folder, **kwargs):
+        before.append(json.loads((tmp_path / "status.json").read_bytes()))
+        if len(before) == 1:
+            (tmp_path / "STOP").write_text("manual")
+        elif len(before) == 2 and remove_after_ack:
+            (tmp_path / "STOP").unlink()
+        return original(store, folder, **kwargs)
+
+    monkeypatch.setattr(RSSStore, "import_run", request_stop_once)
+    # Advance only the collector's progress clock, not time.monotonic process-wide.
+    from types import SimpleNamespace
+
+    ticks = iter(range(0, 100, 3))
+    monkeypatch.setattr(service, "time", SimpleNamespace(monotonic=ticks.__next__))
+    result = execute(tmp_path, [NOW], observer=forbidden, wait_for_current_date=True)
+    assert [r["recovery_runs_checked"] for r in before] == [0, 1, 2]
+    assert before[1]["phase"] == "restoring" and before[1]["stop_reason"] == "stop_file"
+    assert before[1]["status"] == "stopping" and before[1]["recovery_runs_total"] == 3
+    assert result["normal_exit"] and result["stop_reason"] == "stop_file"
+    assert result["recovery_runs_checked"] == result["coverage"]["matched_samples"] == 3
+    assert result["excel_reads"] == result["paper"]["state"]["fills"] == 0
+    if not remove_after_ack:
+        assert (tmp_path / "STOP").read_text() == "manual"
 
 
 def test_resume_after_midnight_keeps_original_deadline(tmp_path):
@@ -187,10 +225,10 @@ def test_export_failure_is_not_normal_and_can_be_recovered(tmp_path, monkeypatch
 def test_failed_final_status_save_never_records_normal_exit(tmp_path, monkeypatch):
     original = service.atomic_write
 
-    def fail_final(path, content):
+    def fail_final(path, content, **kwargs):
         if path.name == "status.json" and json.loads(content).get("normal_exit") is True:
             raise OSError("injected final status failure")
-        return original(path, content)
+        return original(path, content, **kwargs)
 
     monkeypatch.setattr(service, "atomic_write", fail_final)
     with pytest.raises(OSError):
@@ -206,6 +244,29 @@ def test_integrity_failure_prevents_normal_exit(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="inconsistent"):
         execute(tmp_path, [NOW], recover_only=True, observer=forbidden)
     assert json.loads((tmp_path / "status.json").read_bytes())["normal_exit"] is False
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows file sharing")
+def test_collector_can_publish_while_gui_briefly_reads_status(tmp_path, monkeypatch):
+    from trading_system.storage import store
+
+    path = tmp_path / "status.json"
+    path.write_bytes(b"old")
+    replace = os.replace
+    with path.open("rb") as reader:
+
+        def release_after_collision(source, dest):
+            try:
+                replace(source, dest)
+            except PermissionError:
+                assert not reader.closed
+                reader.close()
+                raise
+
+        monkeypatch.setattr(os, "replace", release_after_collision)
+        store.atomic_write(path, b"new", sharing_retries=2)
+        assert reader.closed
+    assert path.read_bytes() == b"new"
 
 
 def test_cli_recovery_never_requires_existing_workbook(tmp_path, monkeypatch, capsys):

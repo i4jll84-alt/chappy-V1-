@@ -46,6 +46,11 @@ def inspect_record(body: bytes, imported_at: datetime) -> dict:
 class RSSStore:
     """Single writer; record and import checkpoint commit in one transaction."""
 
+    _checkpoints = (
+        "SELECT i.run_id,i.sample,i.raw_sha256,o.sample,o.status FROM imports i "
+        "LEFT JOIN observations o USING(run_id,sample)"
+    )
+
     def __init__(self, root: Path):
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
@@ -70,7 +75,16 @@ class RSSStore:
     def __exit__(self, *_):
         self.db.close()
 
-    def import_run(self, run: Path) -> dict:
+    def recovery_checkpoints(self):
+        """Read existing pairs once under the collector's single-writer lock."""
+        rows = self.db.execute(self._checkpoints)
+        checkpoints = {}
+        while batch := rows.fetchmany(4096):
+            for row in batch:
+                checkpoints[row[:2]] = row[2:]
+        return checkpoints
+
+    def import_run(self, run: Path, *, checkpoints=None) -> dict:
         if not re.fullmatch(r"[0-9a-f]{32}", run.name) or not run.is_dir():
             raise ValueError("invalid_run_directory")
         paths = sorted(p for p in run.iterdir() if re.fullmatch(r"\d{3}\.json", p.name))
@@ -92,22 +106,23 @@ class RSSStore:
             else:
                 atomic_write(archived, body)
             sample = int(path.stem)
-            previous = self.db.execute(
-                "SELECT raw_sha256 FROM imports WHERE run_id=? AND sample=?",
-                [run.name, sample],
-            ).fetchone()
+            # Both files have still been hashed. Misses may have been inserted
+            # since the snapshot, so consult the live catalog before inserting.
+            key = (run.name, sample)
+            previous = checkpoints.get(key) if checkpoints is not None else None
+            if previous is None:
+                row = self.db.execute(
+                    self._checkpoints + " WHERE i.run_id=? AND i.sample=?", key
+                ).fetchone()
+                previous = row[2:] if row else None
             if previous:
                 if previous[0] != sha:
                     # Both byte versions remain in Raw. Never silently replace history.
                     raise ValueError("observation_identity_conflict")
                 counts["unchanged"] += 1
-                status = self.db.execute(
-                    "SELECT status FROM observations WHERE run_id=? AND sample=?",
-                    [run.name, sample],
-                ).fetchone()
-                if status is None:
+                if previous[1] is None:
                     raise ValueError("checkpoint_without_observation")
-                counts["attention"] += int(status[0] != "observed")
+                counts["attention"] += int(previous[2] != "observed")
                 continue
             now = datetime.now(UTC)
             record = inspect_record(body, now)

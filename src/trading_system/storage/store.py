@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import os
+import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -41,14 +42,22 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def atomic_write(path: Path, content: bytes) -> None:
+def atomic_write(path: Path, content: bytes, *, sharing_retries: int = 0) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + "." + uuid4().hex + ".tmp")
     with temporary.open("xb") as handle:
         handle.write(content)
         handle.flush()
         os.fsync(handle.fileno())
-    os.replace(temporary, path)
+    while True:
+        try:
+            os.replace(temporary, path)
+            return
+        except PermissionError:
+            if sharing_retries <= 0 or os.name != "nt":
+                raise
+            sharing_retries -= 1
+            time.sleep(0.02)
 
 
 class Store:

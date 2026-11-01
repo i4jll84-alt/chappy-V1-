@@ -67,7 +67,7 @@ try {
     $rssValuesAfter = Read-Column $rssRange.Value2
     $rssFormulasAfter = Read-Column $rssRange.Formula2
     $rssResult = [ordered]@{
-        schema_version = 1
+        schema_version = 2
         status = 'read'
         formulas_before = $rssFormulasBefore
         values_before = $rssValuesBefore

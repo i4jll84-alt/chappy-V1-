@@ -110,15 +110,19 @@ def validate_read(raw: dict, code: str, observed_at: datetime) -> dict:
         return result
     keys = ["formulas_before", "formulas_after", "values_before", "values_after"]
     if (
-        raw.get("schema_version") != 1
+        raw.get("schema_version") not in (1, 2)
         or raw.get("status") != "read"
         or any(not isinstance(raw.get(key), list) or len(raw[key]) != 3 for key in keys)
     ):
         result["issues"] = ["invalid_helper_response"]
         return result
     for position, item in enumerate(ITEMS.values()):
-        expected = f'=RssMarket("{code}","{item}")'
-        allowed = {expected, expected.replace("=RssMarket", "=_xll.RssMarket")}
+        call = f'RssMarket("{code}","{item}")'
+        allowed = {"=" + call, "=_xll." + call}
+        # Formula2 can expose implicit intersection on a single-cell RSS result.
+        # Retain v1's original interpretation when re-auditing stored observations.
+        if raw["schema_version"] == 2:
+            allowed.update(("=@" + call, "=@_xll." + call))
         if any(
             not isinstance(raw[key][position], str) or raw[key][position] not in allowed
             for key in keys[:2]

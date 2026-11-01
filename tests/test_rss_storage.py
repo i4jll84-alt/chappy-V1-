@@ -137,3 +137,32 @@ def test_separate_observations_with_same_price_remain_separate(tmp_path):
     with rss.RSSStore(tmp_path / "store") as store:
         assert store.import_run(run)["imported"] == 2
         assert len(list((store.root / "raw").glob("*.json"))) == 1
+
+
+@pytest.mark.parametrize("fault", ["none", "source", "archive", "missing_observation"])
+def test_recovery_checkpoint_snapshot_checks_each_file_and_pair(tmp_path, fault):
+    run = make_run(tmp_path)
+    with rss.RSSStore(tmp_path / "store") as store:
+        store.import_run(run)
+        if fault == "missing_observation":
+            store.db.execute("DELETE FROM observations")
+        checkpoints = store.recovery_checkpoints()
+        source = run / "000.json"
+        if fault == "source":
+            source.write_bytes(source.read_bytes() + b" ")
+        if fault == "archive":
+            next((store.root / "raw").glob("*.json")).write_bytes(b"changed")
+        if fault == "none":
+            (run / "001.json").write_bytes(source.read_bytes())
+            assert store.import_run(run, checkpoints=checkpoints) == dict(
+                imported=1, unchanged=1, attention=0
+            )
+            assert store.import_run(run, checkpoints=checkpoints)["unchanged"] == 2
+        else:
+            error = {
+                "source": "identity_conflict",
+                "archive": "archive_mismatch",
+                "missing_observation": "checkpoint_without_observation",
+            }[fault]
+            with pytest.raises(ValueError, match=error):
+                store.import_run(run, checkpoints=checkpoints)

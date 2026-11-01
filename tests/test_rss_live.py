@@ -94,6 +94,24 @@ def test_wrong_formula_rejected(formula):
     assert rss_live.validate_read(raw, "1234.T", NOW)["issues"] == ["unexpected_formula"]
 
 
+@pytest.mark.parametrize("prefix", ["=@", "=@_xll."])
+def test_formula2_intersection_on_all_three_cells_in_new_reads_only(prefix):
+    raw = reading()
+    for key in ("formulas_before", "formulas_after"):
+        raw[key] = [prefix + formula[1:] for formula in raw[key]]
+    assert rss_live.validate_read(raw, "1234.T", NOW)["issues"] == ["unexpected_formula"]
+    raw["schema_version"] = 2
+    result = rss_live.validate_read(raw, "1234.T", NOW)
+    assert result["status"] == "observed" and result["excel_read_verified"]
+    for index in range(3):
+        for key in ("formulas_before", "formulas_after"):
+            changed = copy.deepcopy(raw)
+            changed[key][index] += "+1"
+            assert rss_live.validate_read(changed, "1234.T", NOW)["issues"] == [
+                "unexpected_formula"
+            ]
+
+
 def test_unchanged_values_default_not_an_alert(tmp_path):
     summary, records, sleeps = run(tmp_path, [reading()] * 3, [0, 60, 120])
     assert summary["status"] == "observed"

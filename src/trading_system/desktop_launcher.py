@@ -61,6 +61,32 @@ def collector_root(project, broker):
     return project / "data" / ROOTS[broker]
 
 
+def rakuten_progress(project, requested_ns):
+    """Only display a report from the current launch, never yesterday's status."""
+    try:
+        data = json.loads((collector_root(project, "rakuten") / "status.json").read_bytes())
+        started = datetime.fromisoformat(data["started_at"])
+        if started.tzinfo is None or started.timestamp() < requested_ns / 1_000_000_000:
+            return None
+        phase = data["phase"]
+        if phase == "restoring":
+            done, total = data.get("recovery_runs_checked"), data.get("recovery_runs_total")
+            if type(done) is int and type(total) is int and 0 <= done <= total:
+                return f"過去データを復元中（{done:,} / {total:,} 組）"
+            return "過去データを復元中"
+        if phase == "saving_parquet":
+            return "データを書き出しています"
+        if phase == "verifying_saved_data":
+            return "保存したデータを照合しています"
+        if phase == "complete" and data.get("normal_exit") is True:
+            return "保存・照合が完了しました。"
+        if data.get("status") == "failed":
+            return "処理が異常終了しました。取得画面と保存記録を確認してください。"
+    except (OSError, ValueError, KeyError, TypeError, OverflowError):
+        pass
+    return None
+
+
 def collector_active(project, broker):
     """Probe the OS lock; old status files alone are never evidence of a running process."""
     import msvcrt
@@ -148,6 +174,7 @@ class Launcher:
         self.window, self.project = window, project
         self.children = {}
         self.stopping = set()
+        self.rakuten_requested_ns = None
         self.settings_path = project / "data" / "desktop-launcher" / "settings.json"
         self.workbook = Path(os.environ["USERPROFILE"]) / "Documents/RakutenRSS/RSS接続確認.xlsx"
         self.settings = default_settings()
@@ -344,6 +371,8 @@ class Launcher:
                     cwd=self.project,
                     creationflags=subprocess.CREATE_NEW_CONSOLE,
                 )
+                if broker == "rakuten":
+                    self.rakuten_requested_ns = requested
             self.message.set("開始しました。取得の終了時刻以降は、保存済みデータの照合を行います。")
         except (OSError, ValueError):
             messagebox.showerror(
@@ -445,8 +474,14 @@ class Launcher:
                         if broker in self.stopping
                         else "起動中（接続確認・保存処理を含む）"
                     )
+                    if broker == "rakuten" and child is not None and child.poll() is None:
+                        detail = rakuten_progress(self.project, self.rakuten_requested_ns)
+                        if detail:
+                            text = ("停止要求済み / " if broker in self.stopping else "") + detail
                 elif child is not None:
                     text = "終了。取得画面と保存記録で結果を確認してください。"
+                    if child.returncode:
+                        text = "異常終了。取得画面と保存記録を確認してください。"
                 else:
                     text = "停止中。保存済みの過去の状態は現在の稼働を示しません。"
             except OSError:

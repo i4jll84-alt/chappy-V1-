@@ -109,6 +109,35 @@ def test_mufg_lock_prevents_resume_and_stop_is_preserved(tmp_path):
     assert [p.read_text() for p in (root / "stop-history").iterdir()] == ["original stop"]
 
 
+def test_refresh_reports_only_current_rakuten_recovery(tmp_path):
+    root = launcher.collector_root(tmp_path, "rakuten")
+    root.mkdir(parents=True)
+    requested = datetime(2026, 11, 2, tzinfo=UTC)
+    report = dict(phase="restoring", recovery_runs_checked=1250, recovery_runs_total=9399)
+    child = Mock()
+    child.poll.return_value = None
+    view = SimpleNamespace(
+        project=tmp_path,
+        children={"rakuten": child},
+        stopping={"rakuten"},
+        window=Mock(),
+        refresh=Mock(),
+        busy=lambda broker: broker == "rakuten",
+        status={b: Mock() for b in launcher.BROKERS},
+        rakuten_requested_ns=int(requested.timestamp()) * 1_000_000_000,
+    )
+    for started, expected in [
+        ("2026-11-01T10:00:00+09:00", "保存完了を待っています"),
+        ("2026-11-02T09:00:01+09:00", "停止要求済み / 過去データを復元中（1,250 / 9,399 組）"),
+    ]:
+        (root / "status.json").write_text(json.dumps(dict(report, started_at=started)))
+        launcher.Launcher.refresh(view)
+        assert expected in view.status["rakuten"].set.call_args.args[0]
+    (root / "status.json").write_bytes(b"incomplete")
+    launcher.Launcher.refresh(view)
+    assert "保存完了を待っています" in view.status["rakuten"].set.call_args.args[0]
+
+
 def test_both_selection_does_not_partially_launch_when_one_is_busy(tmp_path, monkeypatch):
     import tkinter.messagebox
 

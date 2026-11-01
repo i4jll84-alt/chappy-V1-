@@ -129,7 +129,8 @@ def run(
             )
             report["delay_reason"] = report["phase"] if report["stop_delayed"] else None
             atomic_write(root / "sessions" / f"{session_id}.json", canonical(report).encode())
-            atomic_write(root / "status.json", canonical(report).encode())
+            # The launcher may briefly hold the previous status open on Windows.
+            atomic_write(root / "status.json", canonical(report).encode(), sharing_retries=50)
 
         def stop_requested():
             reason = None
@@ -144,14 +145,16 @@ def run(
                         stop_requested_at=aware_utc(utcnow()).isoformat(),
                         status="stopping",
                         purpose="preparing_stop",
-                        phase="finishing_current_read",
+                        phase="restoring"
+                        if report["phase"] == "restoring"
+                        else "finishing_current_read",
                     )
                     persist()
                 return True
             return False
 
-        def ingest(store, folder, recovery=False):
-            result = store.import_run(folder)
+        def ingest(store, folder, recovery=False, checkpoints=None):
+            result = store.import_run(folder, checkpoints=checkpoints)
             if ledger:
                 for path in sorted(folder.glob("[0-9][0-9][0-9].json")):
                     ledger.consume(
@@ -163,19 +166,37 @@ def run(
             return result
 
         def recover(store):
+            report["phase"] = "restoring"
             folders = sorted(
-                (p for p in runs_root.iterdir() if p.is_dir()),
+                (
+                    p
+                    for p in runs_root.iterdir()
+                    if re.fullmatch(r"[0-9a-f]{32}", p.name) and p.is_dir()
+                ),
                 key=lambda p: p.stat().st_mtime_ns,
             )
-            incomplete = 0
-            for folder in folders:
-                if re.fullmatch(r"[0-9a-f]{32}", folder.name) and any(
-                    folder.glob("[0-9][0-9][0-9].json")
-                ):
-                    result = ingest(store, folder, recovery=True)
+            report.update(
+                recovery_runs_total=len(folders),
+                recovery_runs_checked=0,
+                recovered_incomplete_runs=0,
+            )
+            persist()
+            checkpoints = store.recovery_checkpoints()
+            last_update = time.monotonic()
+            for i, folder in enumerate(folders, 1):
+                if not postprocessing and not report.get("stop_reason"):
+                    stop_requested()
+                if any(folder.glob("[0-9][0-9][0-9].json")):
+                    result = ingest(store, folder, recovery=True, checkpoints=checkpoints)
                     report["recovered_samples"] += result["imported"]
-                    incomplete += int(not (folder / "summary.json").exists())
-            report["recovered_incomplete_runs"] = incomplete
+                    report["recovered_incomplete_runs"] += int(
+                        not (folder / "summary.json").exists()
+                    )
+                report["recovery_runs_checked"] = i
+                now = time.monotonic()
+                if now - last_update >= 2:
+                    persist()
+                    last_update = now
 
         def phase(value):
             report.update(status="stopping", phase=value)
@@ -266,11 +287,11 @@ def run(
             with RSSStore(root / "store") as store:
                 recover(store)
                 refresh_paper()
-                report["phase"] = "capturing" if not postprocessing else "recovering"
-                persist()
                 if postprocessing:
                     report["stop_reason"] = "postprocessing_complete"
-                else:
+                elif "stop_reason" not in report and not stop_requested():
+                    report["phase"] = "capturing"
+                    persist()
                     try:
                         ready = not wait_for_current_date or await_startup(store)
                         while ready and not stop_requested():
