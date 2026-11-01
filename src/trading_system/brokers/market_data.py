@@ -12,8 +12,9 @@ from trading_system.storage.store import atomic_write, canonical
 
 def run(
     root,
-    adapter_factory,
+    adapter_factory=None,
     *,
+    wait_for_adapter=None,
     max_seconds=None,
     interval=5,
     clock=None,
@@ -21,6 +22,8 @@ def run(
     recovery_probe=None,
 ):
     """Acquire lock before prompting; after 16:00 only recover, save and audit local data."""
+    if (adapter_factory is None) == (wait_for_adapter is None):
+        raise ValueError("choose_one_adapter_factory")
     if interval < 5 or (max_seconds is not None and max_seconds <= 0):
         raise ValueError("invalid_capture_limits")
     clock = clock or (lambda: datetime.now(UTC))
@@ -74,7 +77,12 @@ def run(
             status()
             store.recover()
             if not stop_reason():
-                adapter = adapter_factory()
+                # Interactive acquisition shares the original run deadline and STOP check.
+                adapter = (
+                    wait_for_adapter(stop_reason)
+                    if wait_for_adapter is not None
+                    else adapter_factory()
+                )
             if adapter is None:
                 summary["stop_reason"] = stop_reason() or "prompt_cancelled"
             else:

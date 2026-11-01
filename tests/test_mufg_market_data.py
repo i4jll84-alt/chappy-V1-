@@ -476,3 +476,75 @@ def test_sensitive_board_response_never_enters_raw(tmp_path):
     for path in (tmp_path / "raw").glob("*/*.json"):
         envelope = json.loads(path.read_bytes())
         assert envelope["body_base64"] is None and TOKEN not in path.read_text()
+
+
+@pytest.mark.parametrize("first_stop", ["operator_stop", "daytime_1600"])
+def test_capture_restarts_on_same_root_after_unanswered_prompt(
+    tmp_path, monkeypatch, capsys, first_stop
+):
+    from trading_system import desktop_launcher
+    from trading_system.brokers import market_data
+    from trading_system.brokers.mufg_esmart import capture
+
+    clock = Clock("2026-11-02T15:59:59+09:00")
+    root = desktop_launcher.collector_root(tmp_path, "mufg_esmart")
+    calls = []
+
+    def handle(request):
+        calls.append((request.method, request.url.path))
+        if request.method == "POST":
+            return httpx.Response(200, json={"ResultCode": 0, "Token": TOKEN})
+        return httpx.Response(200, json=board(clock))
+
+    def client(value, **kwargs):
+        assert value == PASSWORD
+        return Client(value, transport_factory=lambda: httpx.MockTransport(handle), clock=clock.now)
+
+    monkeypatch.setattr(capture, "Client", client)
+    monkeypatch.setattr(
+        capture, "vendor_adapter", lambda account, **kw: Adapter(account, clock=clock.now, **kw)
+    )
+    monkeypatch.setattr(
+        capture,
+        "run",
+        lambda *args, **kw: market_data.run(*args, **kw, clock=clock.now, sleep=clock.sleep),
+    )
+
+    def wait_until_stopped(stop_reason):
+        if first_stop == "operator_stop":
+            desktop_launcher.request_stop(tmp_path, "mufg_esmart")
+        else:
+            clock.sleep(1)
+        assert stop_reason() == first_stop
+        return None
+
+    monkeypatch.setattr(capture, "password_prompt", wait_until_stopped)
+    args = ["--root", str(root), "--prompt", "--max-seconds", "20"]
+    assert capture.main(args) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert first["normal_exit"] and first["stop_reason"] == first_stop and first["samples"] == 0
+    assert not calls
+    prior = root / "sessions" / (first["session_id"] + ".json")
+    first_bytes = prior.read_bytes()
+    clock.value = instant_next = datetime.fromisoformat("2026-11-03T10:00:00+09:00")
+    with single_writer(root):
+        pass
+    if first_stop == "operator_stop":
+        # The GUI only archives a STOP after the operator confirms resuming.
+        assert capture.main(args) == 0
+        assert json.loads(capsys.readouterr().out)["stop_reason"] == "operator_stop" and not calls
+        desktop_launcher.archive_mufg_stop(tmp_path)
+        assert len(list((root / "stop-history").iterdir())) == 1
+    monkeypatch.setattr(
+        capture, "password_prompt", lambda stop_reason: PASSWORD if not stop_reason() else None
+    )
+    assert capture.main(args) == 0
+    restarted = json.loads(capsys.readouterr().out)
+    assert restarted["started_at"] == instant_next.isoformat()
+    assert restarted["session_id"] != first["session_id"] and prior.read_bytes() == first_bytes
+    assert restarted["normal_exit"] and restarted["data_consistency_verified"]
+    assert restarted["stop_reason"] == "duration_complete" and restarted["samples"] == 4
+    assert restarted["order_requests"] == 0 and restarted["accepted"] == 1
+    assert calls == [("POST", "/kabusapi/token")] + [("GET", "/kabusapi/board/7203@1")] * 3
+    with single_writer(root):
+        pass

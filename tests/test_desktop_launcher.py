@@ -105,3 +105,29 @@ def test_new_template_preserves_strict_three_cell_contract():
     assert result["live_connection_verified"] is False
     assert result["freshness_verified"] is False
     assert all("excel_error" in issue or "missing_cache" in issue for issue in result["issues"])
+
+
+@pytest.mark.parametrize("failed", [(), ("rakuten",), ("mufg_esmart",), launcher.BROKERS])
+def test_stop_all_attempts_each_broker_on_independent_write_errors(tmp_path, monkeypatch, failed):
+    calls = []
+
+    def publish(project, broker):
+        calls.append(broker)
+        if broker in failed:
+            raise PermissionError("unwritable")
+        assert project == tmp_path
+
+    showerror = Mock()
+    monkeypatch.setattr(launcher, "request_stop", publish)
+    monkeypatch.setattr("tkinter.messagebox.showerror", showerror)
+    view = SimpleNamespace(project=tmp_path, stopping=set(), message=Mock())
+    launcher.Launcher.stop_all(view)
+    assert calls == list(launcher.BROKERS)
+    assert view.stopping == set(launcher.BROKERS) - set(failed)
+    if failed:
+        showerror.assert_called_once()
+        assert all(launcher.NAMES[k] in showerror.call_args.args[1] for k in failed)
+        view.message.set.assert_not_called()
+    else:
+        showerror.assert_not_called()
+        view.message.set.assert_called_once()

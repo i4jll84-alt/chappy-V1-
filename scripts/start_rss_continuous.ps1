@@ -1,7 +1,9 @@
 ﻿param(
     [ValidateSet('Start','Stop','Status','Check')][string]$Action = 'Start',
     [string]$DataDirectory = 'data\rss-continuous',
-    [int]$Cycles = 0
+    [int]$Cycles = 0,
+    [string]$ResumeStop,
+    [long]$RecoveryCutoffUnix = 0
 )
 $ErrorActionPreference = 'Stop'
 $startRequested = [datetime]::UtcNow
@@ -21,19 +23,45 @@ if ($Action -eq 'Status') {
     return
 }
 if ($Action -eq 'Stop') {
-    if (Test-Path -LiteralPath $rssData -PathType Container) {
-        [System.IO.File]::WriteAllText($rssStop, 'stop requested')
-        Write-Host '停止を要求しました。現在の読取を終え、保存・照合して停止します。完了までお待ちください。'
-        Write-Host '開始側の画面で終了表示を確認してください。'
-    } else { Write-Host '取得用フォルダーはまだありません。' }
+    [void][IO.Directory]::CreateDirectory($rssData)
+    $token = [Guid]::NewGuid().ToString('N')
+    for ($attempt = 0; ; $attempt++) {
+        try {
+            [IO.File]::WriteAllText($rssStop, $token)
+            break
+        } catch [IO.IOException], [UnauthorizedAccessException] {
+            if ($attempt -ge 50) { throw }
+            Start-Sleep -Milliseconds 20
+        }
+    }
+    Write-Host '停止を要求しました。現在の読取を終え、保存・照合して停止します。完了までお待ちください。'
+    Write-Host '開始側の画面で終了表示を確認してください。'
     return
+}
+# The GUI supplies its snapshot. A direct Start takes its own before any startup checks.
+if ($Action -eq 'Start' -and -not $ResumeStop) {
+    $ResumeStop = 'none'
+    $marker = $rssStop
+    if (-not [IO.File]::Exists($marker)) { $marker = Join-Path $rssData 'STOP.resuming' }
+    if ([IO.File]::Exists($marker)) {
+        $stamp = [IO.File]::GetLastWriteTimeUtc($marker)
+        if ($stamp -lt $startRequested) {
+            $share = [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+            $stream = [IO.File]::Open($marker, 'Open', 'Read', $share)
+            try {
+                $hash = (Get-FileHash -InputStream $stream -Algorithm SHA256).Hash.ToLowerInvariant()
+                $ticks = $stamp.Ticks - 621355968000000000L
+                $ResumeStop = "$($ticks):$($hash)"
+            } finally { $stream.Dispose() }
+        }
+    }
 }
 if (-not (Test-Path -LiteralPath $rssPython -PathType Leaf)) { throw 'Pythonが見つかりません。' }
 Push-Location -LiteralPath $rssProject
 try {
     if ($Action -eq 'Check') {
         & $rssPython -m trading_system.rss_continuous --help
-        return
+        exit $LASTEXITCODE
     }
     $active = @(Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
         $_.Name -match '^python(w)?\.exe$' -and $_.CommandLine -match 'trading_system\.rss_continuous'
@@ -43,7 +71,11 @@ try {
         return
     }
     function Test-RssLateStart {
-        $tokyo = [TimeZoneInfo]::ConvertTimeBySystemTimeZoneId([DateTimeOffset]::Now, 'Tokyo Standard Time')
+        $now = [DateTimeOffset]::Now
+        if ($RecoveryCutoffUnix -gt 0 -and $now.ToUnixTimeSeconds() -ge $RecoveryCutoffUnix) {
+            return $true
+        }
+        $tokyo = [TimeZoneInfo]::ConvertTimeBySystemTimeZoneId($now, 'Tokyo Standard Time')
         # Reserve at least one minute for the three bounded readiness reads.
         return $tokyo.TimeOfDay -ge [TimeSpan]::FromMinutes(15 * 60 + 59)
     }
@@ -56,15 +88,8 @@ try {
             Write-Host '保存・照合を終えて停止しました。過去の注意履歴は記録に残しています。' -ForegroundColor Green
         }
     }
-    if (Test-RssLateStart) { Invoke-RssPostprocessing; return }
+    if (Test-RssLateStart) { Invoke-RssPostprocessing; exit $LASTEXITCODE }
     if (-not (Test-Path -LiteralPath $rssWorkbook -PathType Leaf)) { throw 'RSS接続確認.xlsxが見つかりません。' }
-    if (Test-Path -LiteralPath $rssStop) {
-        if ((Get-Item -LiteralPath $rssStop).LastWriteTimeUtc -ge $startRequested) {
-            Write-Host '起動中に新しい停止要求が届いたため開始しません。' -ForegroundColor Yellow
-            return
-        }
-        Remove-Item -LiteralPath $rssStop
-    }
     Write-Host 'RSS常時取得・仮想取引の動作確認（実発注なし）' -ForegroundColor Cyan
     Write-Host 'マーケットスピードIIにログインし、Excelを「接続中・発注不可」にしてください。'
     Write-Host '対象7203.T。約2秒の待機を挟んで読み取ります。実際の間隔には読取時間が加わります。'
@@ -77,7 +102,8 @@ try {
     Write-Host '仮想取引は固定シナリオ1往復だけ。完了後も株価取得を継続します。'
     Write-Host '停止は共通起動画面の「両方の取得を停止」、またはCtrl+Cを使用してください。'
     Write-Host ('状態・保存先: ' + $rssData)
-    & $rssPython -m trading_system.rss_continuous --workbook $rssWorkbook --code 7203.T --root $rssData --paper --cycles $Cycles --wait-for-current-date
+    & $rssPython -m trading_system.rss_continuous --workbook $rssWorkbook --code 7203.T --root $rssData --paper --cycles $Cycles --wait-for-current-date --resume-stop $ResumeStop
     if ($LASTEXITCODE -ne 0) { Write-Host '終了状態を確認してください。二重起動時は既存の取得が優先されます。' -ForegroundColor Yellow }
     else { Write-Host '保存・照合を終えて停止しました。' -ForegroundColor Green }
+    exit $LASTEXITCODE
 } finally { Pop-Location }

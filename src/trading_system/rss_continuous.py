@@ -16,6 +16,7 @@ from trading_system.monitoring.rss import audit, audit_runs
 from trading_system.paper_rss import PaperLedger
 from trading_system.point_in_time.policy import aware_utc
 from trading_system.rss_startup import WAITING_STATES, assess_startup
+from trading_system.rss_stop import can_start
 from trading_system.runtime.models import daytime_deadline
 from trading_system.storage.rss import RSSStore
 from trading_system.storage.store import atomic_write, canonical
@@ -59,6 +60,7 @@ def run(
     sleeper=time.sleep,
     utcnow=lambda: datetime.now(UTC),
     recover_only=False,
+    resume_stop=None,
     wait_for_current_date=False,
     progress=None,
 ):
@@ -76,7 +78,7 @@ def run(
         if config_path.exists() and json.loads(config_path.read_bytes()) != config:
             raise ValueError("collector_configuration_changed_use_new_root")
         atomic_write(config_path, canonical(config).encode())
-        if (root / "STOP").exists() and not postprocessing:
+        if not postprocessing and not can_start(root, resume_stop):
             raise ValueError("stop_requested_remove_STOP_to_start")
         session_id = uuid4().hex
         report = dict(
@@ -360,6 +362,7 @@ def main(argv=None):
     parser.add_argument("--workbook", type=Path, required=True)
     parser.add_argument("--code", default="7203.T")
     parser.add_argument("--root", type=Path, default=Path("data/rss-continuous"))
+    parser.add_argument("--resume-stop", help="Acknowledge only the stop seen at manual Start")
     parser.add_argument("--cycles", type=int, default=0, help="0: until STOP file or Ctrl+C")
     parser.add_argument("--interval", type=float, default=2)
     parser.add_argument(

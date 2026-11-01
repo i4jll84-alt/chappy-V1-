@@ -5,7 +5,11 @@ import os
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
+from time import time_ns
 from uuid import uuid4
+from zoneinfo import ZoneInfo
+
+from trading_system.rss_stop import publish_stop, stop_ticket
 
 BROKERS = ("rakuten", "mufg_esmart")
 NAMES = {"rakuten": "楽天証券", "mufg_esmart": "カブコム / 三菱UFJ eスマート証券"}
@@ -89,11 +93,20 @@ def archive_mufg_stop(project):
 
 def request_stop(project, broker):
     root = collector_root(project, broker)
+    if broker == "rakuten":
+        publish_stop(root)
+        return
     root.mkdir(parents=True, exist_ok=True)
     (root / "STOP").write_text("stop requested from desktop launcher", encoding="utf-8")
 
 
-def launch_command(project, broker):
+def rss_cutoff(requested_ns):
+    """Unix seconds at 15:59 JST on the date the operator requested Start."""
+    local = datetime.fromtimestamp(requested_ns // 1_000_000_000, ZoneInfo("Asia/Tokyo"))
+    return int(local.replace(hour=15, minute=59, second=0, microsecond=0).timestamp())
+
+
+def launch_command(project, broker, *, resume_stop="none", cutoff=None):
     if broker == "rakuten":
         shell = Path(os.environ.get("SystemRoot", "C:/Windows")) / (
             "System32/WindowsPowerShell/v1.0/powershell.exe"
@@ -105,6 +118,10 @@ def launch_command(project, broker):
             "Bypass",
             "-File",
             str(project / "scripts" / "start_rss_continuous.ps1"),
+            "-RecoveryCutoffUnix",
+            str(cutoff if cutoff is not None else rss_cutoff(time_ns())),
+            "-ResumeStop",
+            resume_stop,
             "-Action",
             "Start",
         ]
@@ -224,15 +241,21 @@ class Launcher:
     def selected(self):
         return list(BROKERS) if self.mode.get() == "both" else [self.mode.get()]
 
-    def open_workbook(self):
+    def open_workbook(self, cutoff=None):
         from tkinter import messagebox
 
-        if not self.workbook.is_file():
-            messagebox.showerror("Excel", "楽天用のRSS接続確認.xlsxが見つかりません。")
-            return False
+        now = time_ns()
+        if cutoff is None:
+            cutoff = rss_cutoff(now)
+        if now // 1_000_000_000 >= cutoff:
+            self.message.set("日本時間15:59以降は楽天のExcelを開かず、保存済みデータを照合します。")
+            return None
         try:
             os.startfile(self.workbook)
             return True
+        except FileNotFoundError:
+            messagebox.showerror("Excel", "楽天用のRSS接続確認.xlsxが見つかりません。")
+            return False
         except OSError:
             messagebox.showerror(
                 "Excel", "Excelを開けません。Excelのインストールを確認してください。"
@@ -261,10 +284,19 @@ class Launcher:
         )
 
     def start(self):
+        requested = time_ns()
         from tkinter import messagebox
 
         try:
             chosen = self.selected()
+            cutoff = rss_cutoff(requested) if "rakuten" in chosen else None
+            resume_stop = "none"
+            if cutoff is not None and requested // 1_000_000_000 < cutoff:
+                root = collector_root(self.project, "rakuten")
+                marker = root / "STOP"
+                if not marker.exists():
+                    marker = root / "STOP.resuming"
+                resume_stop = stop_ticket(marker, requested)
             # Check all selections before launching any, so partial starts are explicit.
             for broker in chosen:
                 if self.busy(broker):
@@ -272,7 +304,13 @@ class Launcher:
                         "起動済み", NAMES[broker] + "は起動中です。二重起動しません。"
                     )
                     return
-            if "rakuten" in chosen and not self.workbook.is_file():
+            # A slow workbook path lookup can itself cross into offline recovery.
+            if (
+                cutoff is not None
+                and time_ns() // 1_000_000_000 < cutoff
+                and not self.workbook.is_file()
+                and time_ns() // 1_000_000_000 < cutoff
+            ):
                 messagebox.showerror("Excel", "楽天用Excelシートが見つかりません。")
                 return
             if (
@@ -287,18 +325,21 @@ class Launcher:
                 archive_mufg_stop(self.project)
             self.settings["brokers"] = chosen
             save_settings(self.settings_path, self.settings)
-            if "rakuten" in chosen and not self.open_workbook():
+            # A modal confirmation above may have crossed the cutoff or midnight.
+            if (
+                cutoff is not None
+                and time_ns() // 1_000_000_000 < cutoff
+                and self.open_workbook(cutoff) is False
+            ):
                 return
             for broker in chosen:
                 self.stopping.discard(broker)
                 self.children[broker] = subprocess.Popen(
-                    launch_command(self.project, broker),
+                    launch_command(self.project, broker, resume_stop=resume_stop, cutoff=cutoff),
                     cwd=self.project,
                     creationflags=subprocess.CREATE_NEW_CONSOLE,
                 )
-            self.message.set(
-                "起動しました。楽天は自動でデータを検査します。カブコムは入力画面で操作を続けてください。"
-            )
+            self.message.set("開始しました。取得の終了時刻以降は、保存済みデータの照合を行います。")
         except (OSError, ValueError):
             messagebox.showerror(
                 "起動",
@@ -308,16 +349,23 @@ class Launcher:
     def stop_all(self):
         from tkinter import messagebox
 
-        try:
-            for broker in BROKERS:
+        failed = []
+        for broker in BROKERS:
+            try:
                 request_stop(self.project, broker)
+            except OSError:
+                failed.append(NAMES[broker])
+            else:
                 self.stopping.add(broker)
-            self.message.set(
-                "停止を要求しました。保存完了までお待ちください。入力画面がある場合は取り消してください。"
-            )
-        except OSError:
+        if failed:
             messagebox.showerror(
-                "停止", "停止要求を書き込めません。各取得画面から停止してください。"
+                "停止",
+                "停止要求を記録できませんでした。取得画面から停止してください。\n"
+                + "、".join(failed),
+            )
+        else:
+            self.message.set(
+                "停止を要求しました。入力画面は自動で閉じます。保存完了までお待ちください。"
             )
 
     def configure(self):
@@ -388,7 +436,7 @@ class Launcher:
                 child = self.children.get(broker)
                 if self.busy(broker):
                     text = (
-                        "停止処理中 / 入力画面は取り消してください"
+                        "停止処理中 / 保存完了を待っています"
                         if broker in self.stopping
                         else "起動中（接続確認・保存処理を含む）"
                     )
@@ -411,7 +459,7 @@ class Launcher:
         if active:
             messagebox.showinfo(
                 "終了前の確認",
-                "取得または入力待ちが残っています。停止ボタンで停止し、入力画面を閉じてから終了してください。",
+                "取得または入力待ちが残っています。停止ボタンを押し、保存完了後に終了してください。",
             )
         else:
             self.window.destroy()

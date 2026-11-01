@@ -3,6 +3,7 @@
 import argparse
 import json
 from pathlib import Path
+from time import sleep
 
 from trading_system.brokers.market_data import run
 from trading_system.brokers.models import Account
@@ -10,23 +11,68 @@ from trading_system.brokers.mufg_esmart.market_data import Client, RecoveryProbe
 from trading_system.brokers.registry import vendor_adapter
 
 
-def password_prompt():
-    import tkinter as tk
-    from tkinter import simpledialog
+def _prompt_window(tk, stop_reason):
+    for attempt in range(3):
+        if stop_reason():
+            return None
+        try:
+            return tk.Tk()
+        except tk.TclError as exc:
+            if stop_reason():
+                return None
+            # Windows may briefly fail to read an installed Tcl/Tk startup script.
+            if attempt == 2 or not str(exc).startswith(
+                ("Can't find a usable init.tcl", "Can't find a usable tk.tcl")
+            ):
+                raise
+            sleep(0.05)
 
-    window = tk.Tk()
+
+def password_prompt(stop_reason):
+    """Wait for input on the Tk thread, waking every 200 ms to check the capture's stop rule."""
+    import tkinter as tk
+    from tkinter import ttk
+
+    window = _prompt_window(tk, stop_reason)
+    if window is None:
+        return None
     window.withdraw()
-    window.attributes("-topmost", True)
     try:
-        return simpledialog.askstring(
-            "三菱UFJ 取得専用・16時終了（実発注なし）",
-            "kabuステーションの【本番用】APIパスワードを入力してください。\n"
-            "7203の株価・板を5秒以上の間隔で取得し、16時に保存・照合後終了します。\n"
-            "注文・訂正・取消は行いません。パスワードとトークンは保存しません。\n"
-            "接続確認のため、この取得処理だけを一時中断し復帰を確認する場合があります。",
-            show="*",
-            parent=window,
-        )
+        window.title("三菱UFJ 取得専用・16時終了（実発注なし）")
+        window.attributes("-topmost", True)
+        frame = ttk.Frame(window, padding=12)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(
+            frame,
+            text="kabuステーションの本番用APIパスワードを入力してください。\n"
+            "7203の株価・板を取得します。パスワードは保存しません。\n"
+            "停止要求または日本時間16時でこの画面を閉じ、保存・照合します。",
+        ).pack(anchor="w")
+        entry = ttk.Entry(frame, show="*")
+        entry.pack(fill="x", pady=8)
+        action = tk.StringVar(window)
+        buttons = ttk.Frame(frame)
+        buttons.pack(anchor="e")
+        ttk.Button(buttons, text="開始", command=lambda: action.set("submit")).pack(side="left")
+        ttk.Button(buttons, text="取消", command=lambda: action.set("cancel")).pack(side="left")
+        window.bind("<Return>", lambda _: action.set("submit"))
+        window.bind("<Escape>", lambda _: action.set("cancel"))
+        window.protocol("WM_DELETE_WINDOW", lambda: action.set("cancel"))
+        if stop_reason():
+            return None
+        window.deiconify()
+        entry.focus_set()
+        while not stop_reason():
+            timer = window.after(200, action.set, "poll")
+            try:
+                window.wait_variable(action)
+            finally:
+                window.after_cancel(timer)
+            if action.get() == "cancel":
+                return None
+            if action.get() == "submit" and not stop_reason():
+                return entry.get()
+        return None
     finally:
         window.destroy()
 
@@ -54,11 +100,11 @@ def main(argv=None):
         return 0
     probe = RecoveryProbe() if args.verify_reconnect else None
 
-    def factory():
+    def factory(stop_reason):
         if args.recover:
             return None
-        password = password_prompt()
-        if password is None:
+        password = password_prompt(stop_reason)
+        if password is None or stop_reason():
             return None
         client = Client(password, transport_factory=probe.transport if probe else None)
         password = None
@@ -69,7 +115,9 @@ def main(argv=None):
         )
 
     try:
-        result = run(args.root, factory, max_seconds=args.max_seconds, recovery_probe=probe)
+        result = run(
+            args.root, wait_for_adapter=factory, max_seconds=args.max_seconds, recovery_probe=probe
+        )
         print(json.dumps(result), flush=True)
         return 0 if result["normal_exit"] else 2
     except Exception:
