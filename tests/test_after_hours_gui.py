@@ -93,15 +93,16 @@ def test_mufg_resume_confirmation_crossing_rakuten_cutoff(tmp_path, monkeypatch,
     )
 
 
-def test_workbook_button_waits_until_next_day(tmp_path, monkeypatch):
+def test_manual_workbook_button_opens_even_after_close(tmp_path, monkeypatch):
     screen = view(tmp_path, ["rakuten"])
     screen.workbook.touch()
     shell_open = Mock()
     monkeypatch.setattr(gui.os, "startfile", shell_open, raising=False)
     clock = [ns("2026-11-02T16:00:00+09:00")]
     monkeypatch.setattr(gui, "time_ns", lambda: clock[0])
-    assert gui.Launcher.open_workbook(screen) is None
-    shell_open.assert_not_called()
+    assert gui.Launcher.open_workbook(screen)
+    shell_open.assert_called_once_with(screen.workbook)
+    shell_open.reset_mock()
     clock[0] = ns("2026-11-03T09:00:00+09:00")
     assert gui.Launcher.open_workbook(screen)
     shell_open.assert_called_once_with(screen.workbook)

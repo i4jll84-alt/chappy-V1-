@@ -7,7 +7,6 @@ import httpx
 
 from trading_system.brokers.mufg_esmart.connection_check import (
     BASE,
-    BOARD_PATH,
     ProbeError,
     ReadOnlyTransport,
     _contains_secret,
@@ -17,13 +16,14 @@ from trading_system.brokers.mufg_esmart.connection_check import (
 
 
 class Client:
-    """Only token POST and one fixed-symbol board GET; retries belong to the runner."""
+    """Only token POST and explicitly allowed board GETs; default is Toyota alone."""
 
-    def __init__(self, password, *, transport_factory=None, clock=None):
+    def __init__(self, password, *, transport_factory=None, clock=None, board_symbols=("7203",)):
         if not isinstance(password, str) or not re.fullmatch(r"[A-Za-z0-9]{6,16}", password):
             raise ValueError("api_password_format_invalid")
         self._password = password
         self._token = None
+        self._board_symbols = tuple(board_symbols)
         self._factory = transport_factory or (lambda: httpx.HTTPTransport(retries=0))
         self._clock = clock or (lambda: datetime.now(UTC))
         self._http = None
@@ -39,13 +39,15 @@ class Client:
             self._http.close()
         self._http = None
 
-    def read(self):
+    def read(self, code="7203"):
         if self.closed:
             raise ValueError("client_closed")
+        if code not in self._board_symbols:
+            raise ValueError("board_symbol_not_allowed")
         operation = "board" if self.authenticated else "token"
         result = {
             "broker": "mufg_esmart",
-            "code": "7203",
+            "code": code,
             "operation": operation,
             "read_started_at": self._clock().isoformat(),
             "http_status": None,
@@ -62,7 +64,7 @@ class Client:
         try:
             if self._http is None:
                 self._http = httpx.Client(
-                    transport=ReadOnlyTransport(self._factory()),
+                    transport=ReadOnlyTransport(self._factory(), board_symbols=self._board_symbols),
                     timeout=5,
                     trust_env=False,
                     follow_redirects=False,
@@ -73,7 +75,7 @@ class Client:
                 )
             else:
                 status, body = _read(
-                    self._http, "GET", BASE + BOARD_PATH, headers={"X-API-KEY": self._token}
+                    self._http, "GET", BASE + f"/board/{code}@1", headers={"X-API-KEY": self._token}
                 )
             result["http_status"] = status
             if operation == "board":

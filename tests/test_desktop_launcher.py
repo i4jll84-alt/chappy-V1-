@@ -109,6 +109,26 @@ def test_mufg_lock_prevents_resume_and_stop_is_preserved(tmp_path):
     assert [p.read_text() for p in (root / "stop-history").iterdir()] == ["original stop"]
 
 
+@pytest.mark.parametrize(
+    "broker,module", [("panel", "research_panel"), ("kabu_panel", "kabu_study")]
+)
+@pytest.mark.parametrize("hour,once", [(9, False), (20, True)])
+def test_research_buttons_choose_daytime_or_after_close(
+    tmp_path, monkeypatch, broker, module, hour, once
+):
+    when = datetime.fromisoformat(f"2026-11-04T{hour:02}:00:00+09:00")
+    monkeypatch.setattr(launcher, "time_ns", lambda: int(when.timestamp() * 1e9))
+    spawn = Mock()
+    monkeypatch.setattr(launcher.subprocess, "Popen", spawn)
+    view = SimpleNamespace(
+        project=tmp_path, children={}, stopping=set(), busy=lambda _: False, message=Mock()
+    )
+    launcher.Launcher.start_panel(view, broker)
+    args = spawn.call_args.args[0]
+    assert ("--snapshot-now" in args) == once and "trading_system." + module in args
+    assert view.children[broker] is spawn.return_value
+
+
 def test_refresh_reports_only_current_rakuten_recovery(tmp_path):
     root = launcher.collector_root(tmp_path, "rakuten")
     root.mkdir(parents=True)
@@ -123,7 +143,7 @@ def test_refresh_reports_only_current_rakuten_recovery(tmp_path):
         window=Mock(),
         refresh=Mock(),
         busy=lambda broker: broker == "rakuten",
-        status={b: Mock() for b in launcher.BROKERS},
+        status={b: Mock() for b in launcher.CAPTURES},
         rakuten_requested_ns=int(requested.timestamp()) * 1_000_000_000,
     )
     for started, expected in [
@@ -163,7 +183,9 @@ def test_new_template_preserves_strict_three_cell_contract():
     assert all("excel_error" in issue or "missing_cache" in issue for issue in result["issues"])
 
 
-@pytest.mark.parametrize("failed", [(), ("rakuten",), ("mufg_esmart",), launcher.BROKERS])
+@pytest.mark.parametrize(
+    "failed", [(), ("rakuten",), ("mufg_esmart",), ("panel",), launcher.CAPTURES]
+)
 def test_stop_all_attempts_each_broker_on_independent_write_errors(tmp_path, monkeypatch, failed):
     calls = []
 
@@ -178,8 +200,8 @@ def test_stop_all_attempts_each_broker_on_independent_write_errors(tmp_path, mon
     monkeypatch.setattr("tkinter.messagebox.showerror", showerror)
     view = SimpleNamespace(project=tmp_path, stopping=set(), message=Mock())
     launcher.Launcher.stop_all(view)
-    assert calls == list(launcher.BROKERS)
-    assert view.stopping == set(launcher.BROKERS) - set(failed)
+    assert calls == list(launcher.CAPTURES)
+    assert view.stopping == set(launcher.CAPTURES) - set(failed)
     if failed:
         showerror.assert_called_once()
         assert all(launcher.NAMES[k] in showerror.call_args.args[1] for k in failed)

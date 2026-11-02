@@ -28,7 +28,7 @@ def _prompt_window(tk, stop_reason):
             sleep(0.05)
 
 
-def password_prompt(stop_reason):
+def password_prompt(stop_reason, target="7203の株価・板", *, one_pass=False):
     """Wait for input on the Tk thread, waking every 200 ms to check the capture's stop rule."""
     import tkinter as tk
     from tkinter import ttk
@@ -38,15 +38,23 @@ def password_prompt(stop_reason):
         return None
     window.withdraw()
     try:
-        window.title("三菱UFJ 取得専用・16時終了（実発注なし）")
+        window.title(
+            "カブコム・市況を1回取得（実発注なし）"
+            if one_pass
+            else "三菱UFJ 取得専用・16時終了（実発注なし）"
+        )
         window.attributes("-topmost", True)
         frame = ttk.Frame(window, padding=12)
         frame.pack(fill="both", expand=True)
         ttk.Label(
             frame,
             text="kabuステーションの本番用APIパスワードを入力してください。\n"
-            "7203の株価・板を取得します。パスワードは保存しません。\n"
-            "停止要求または日本時間16時でこの画面を閉じ、保存・照合します。",
+            f"{target}を取得します。パスワードは保存しません。\n"
+            + (
+                "対象の銘柄を1巡して終了します。入力待ちは最長5分です。"
+                if one_pass
+                else "停止要求または日本時間16時でこの画面を閉じ、保存・照合します。"
+            ),
         ).pack(anchor="w")
         entry = ttk.Entry(frame, show="*")
         entry.pack(fill="x", pady=8)

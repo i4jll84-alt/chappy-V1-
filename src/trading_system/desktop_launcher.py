@@ -12,8 +12,19 @@ from zoneinfo import ZoneInfo
 from trading_system.rss_stop import publish_stop, stop_ticket
 
 BROKERS = ("rakuten", "mufg_esmart")
-NAMES = {"rakuten": "楽天証券", "mufg_esmart": "カブコム / 三菱UFJ eスマート証券"}
-ROOTS = {"rakuten": "rss-continuous", "mufg_esmart": "mufg-continuous"}
+CAPTURES = (*BROKERS, "panel", "kabu_panel")
+NAMES = {
+    "rakuten": "楽天証券",
+    "mufg_esmart": "カブコム / 三菱UFJ eスマート証券",
+    "panel": "楽天31銘柄研究",
+    "kabu_panel": "カブコム31銘柄研究",
+}
+ROOTS = {
+    "rakuten": "rss-continuous",
+    "mufg_esmart": "mufg-continuous",
+    "panel": "rss-panel",
+    "kabu_panel": "mufg-panel",
+}
 PROJECT = Path(__file__).resolve().parents[2]
 
 
@@ -119,7 +130,7 @@ def archive_mufg_stop(project):
 
 def request_stop(project, broker):
     root = collector_root(project, broker)
-    if broker == "rakuten":
+    if broker in ("rakuten", "panel", "kabu_panel"):
         publish_stop(root)
         return
     root.mkdir(parents=True, exist_ok=True)
@@ -237,20 +248,29 @@ class Launcher:
         ttk.Button(actions, text="選択した証券会社を開始", command=self.start).pack(
             side="left", padx=(0, 10)
         )
-        ttk.Button(actions, text="両方の取得を停止", command=self.stop_all).pack(side="left")
+        ttk.Button(actions, text="すべての取得を停止", command=self.stop_all).pack(side="left")
         ttk.Button(actions, text="設定", command=self.configure).pack(side="right")
+        study = ttk.Frame(frame)
+        study.pack(fill="x", pady=(6, 0))
+        ttk.Button(study, text="楽天31銘柄の研究取得", command=self.start_panel).pack(
+            side="left", padx=(0, 10)
+        )
+        ttk.Button(
+            study, text="カブコム31銘柄の研究取得", command=lambda: self.start_panel("kabu_panel")
+        ).pack(side="left")
         status_frame = ttk.LabelFrame(frame, text="取得状態", padding=12)
         status_frame.pack(fill="x", pady=15)
-        self.status = {broker: tk.StringVar() for broker in BROKERS}
-        for broker in BROKERS:
+        self.status = {broker: tk.StringVar() for broker in CAPTURES}
+        self.panel_requested_ns = 0
+        for broker in CAPTURES:
             ttk.Label(status_frame, textvariable=self.status[broker], wraplength=710).pack(
                 anchor="w", pady=5
             )
         ttk.Label(
             frame,
             text=(
-                "対象：7203 トヨタ自動車（接続確認用）\n"
-                "取得は日本時間16時に終了します。16時以降の開始は保存済みデータの後処理です。\n"
+                "通常の開始は7203の接続確認。研究ボタンは30銘柄＋トヨタの分足と気配を記録します。\n"
+                "場中の継続取得は16時で終了。引け後の研究ボタンは市況を一度読み取ります。\n"
                 "現在は取得・ペーパートレード用です。実発注は無効です。"
             ),
             wraplength=740,
@@ -272,10 +292,8 @@ class Launcher:
         from tkinter import messagebox
 
         now = time_ns()
-        if cutoff is None:
-            cutoff = rss_cutoff(now)
-        if now // 1_000_000_000 >= cutoff:
-            self.message.set("日本時間15:59以降は楽天のExcelを開かず、保存済みデータを照合します。")
+        if cutoff is not None and now // 1_000_000_000 >= cutoff:
+            self.message.set("通常取得は終了時刻のため、保存済みデータを照合します。")
             return None
         try:
             os.startfile(self.workbook)
@@ -380,11 +398,54 @@ class Launcher:
                 "起動できませんでした。既に起動した取得は状態欄と停止ボタンで確認してください。",
             )
 
+    def start_panel(self, broker="panel"):
+        from tkinter import messagebox
+
+        requested = time_ns()
+        late = requested // 1_000_000_000 >= rss_cutoff(requested)
+        try:
+            if self.busy(broker) or (broker == "kabu_panel" and self.busy("mufg_esmart")):
+                self.message.set("同じ取得元が起動中です。既存の取得の終了を確認してください。")
+                return
+            root = collector_root(self.project, broker)
+            marker = root / "STOP"
+            resume = stop_ticket(marker if marker.exists() else root / "STOP.resuming", requested)
+            self.children[broker] = subprocess.Popen(
+                [
+                    str(self.project / ".venv/Scripts/python.exe"),
+                    "-B",
+                    "-X",
+                    "utf8",
+                    "-m",
+                    "trading_system.research_panel"
+                    if broker == "panel"
+                    else "trading_system.kabu_study",
+                    "--requested",
+                    str(requested),
+                    "--resume",
+                    resume,
+                    *(["--snapshot-now"] if late else []),
+                ],
+                cwd=self.project,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            if broker == "panel":
+                self.panel_requested_ns = requested
+            self.stopping.discard(broker)
+            self.message.set(
+                NAMES[broker]
+                + ("：引け後の記録を取得して終了します。" if late else "：研究取得を開始しました。")
+            )
+        except (OSError, ValueError):
+            messagebox.showerror(
+                "研究取得", "起動できません。研究用ブックと保存先を確認してください。"
+            )
+
     def stop_all(self):
         from tkinter import messagebox
 
         failed = []
-        for broker in BROKERS:
+        for broker in CAPTURES:
             try:
                 request_stop(self.project, broker)
             except OSError:
@@ -465,7 +526,7 @@ class Launcher:
         ttk.Button(frame, text="設定を保存", command=save).pack(anchor="e", pady=8)
 
     def refresh(self):
-        for broker in BROKERS:
+        for broker in CAPTURES:
             try:
                 child = self.children.get(broker)
                 if self.busy(broker):
@@ -478,6 +539,35 @@ class Launcher:
                         detail = rakuten_progress(self.project, self.rakuten_requested_ns)
                         if detail:
                             text = ("停止要求済み / " if broker in self.stopping else "") + detail
+                    if broker == "panel" and broker not in self.stopping:
+                        try:
+                            data = json.loads(
+                                (collector_root(self.project, broker) / "status.json").read_bytes()
+                            )
+                            if (
+                                datetime.fromisoformat(data["updated_at"]).timestamp()
+                                >= self.panel_requested_ns / 1e9
+                            ):
+                                if data["state"] == "read":
+                                    text = (
+                                        f"直近の有効気配 {data['books']}/31銘柄、"
+                                        f"確認した分足 {data['valid_bars_seen']}本"
+                                    )
+                                elif data["state"] not in ("starting", "stopped"):
+                                    text = "研究用Excel・RSSの応答待ち（自動再確認）"
+                        except (OSError, ValueError, KeyError, TypeError):
+                            pass
+                    if broker == "kabu_panel" and broker not in self.stopping:
+                        try:
+                            data = json.loads(
+                                (collector_root(self.project, broker) / "status.json").read_bytes()
+                            )
+                            if data.get("state") == "prompt":
+                                text = "PCの専用画面でAPIパスワードを入力してください。"
+                            elif data.get("state") == "recording":
+                                text = f"板を巡回中（累計{data['board_reads']}回照会）"
+                        except (ValueError, KeyError, OSError):
+                            pass
                 elif child is not None:
                     text = "終了。取得画面と保存記録で結果を確認してください。"
                     if child.returncode:
@@ -493,7 +583,7 @@ class Launcher:
         from tkinter import messagebox
 
         try:
-            active = any(self.busy(b) for b in BROKERS)
+            active = any(self.busy(b) for b in CAPTURES)
         except OSError:
             active = True
         if active:

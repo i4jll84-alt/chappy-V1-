@@ -24,11 +24,23 @@ class ProbeError(RuntimeError):
 
 
 class ReadOnlyTransport(httpx.BaseTransport):
-    def __init__(self, inner=None):
+    def __init__(self, inner=None, *, board_symbols=("7203",)):
+        symbols = tuple(board_symbols)
+        if (
+            not 1 <= len(symbols) <= 31
+            or len(set(symbols)) != len(symbols)
+            or any(
+                not isinstance(s, str) or not re.fullmatch(r"[0-9][A-Z0-9]{3}", s) for s in symbols
+            )
+        ):
+            raise ValueError("invalid_board_symbols")
+        self.allowed = frozenset(
+            {("POST", BASE + "/token"), *(("GET", BASE + "/board/" + s + "@1") for s in symbols)}
+        )
         self.inner = inner if inner is not None else httpx.HTTPTransport(retries=0)
 
     def handle_request(self, request):
-        if (request.method, str(request.url)) not in ALLOWED:
+        if (request.method, str(request.url)) not in self.allowed:
             raise ProbeError("request_not_allowed")
         return self.inner.handle_request(request)
 
