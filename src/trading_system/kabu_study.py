@@ -261,6 +261,9 @@ def main():
     )
     a = p.parse_args()
     run(PROJECT, a.requested, a.resume, one_pass=a.snapshot_now)
+    from trading_system.research.shared_market import after_stop
+
+    after_stop(PROJECT, datetime.fromtimestamp(a.requested / 1e9, JST).date(), "mufg_esmart")
 
 
 if __name__ == "__main__":

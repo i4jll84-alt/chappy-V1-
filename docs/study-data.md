@@ -32,6 +32,19 @@ framesとquotesには読み取れなかった状態も残り、研究ボタン�
 稼働中のブックは差し替えない。Excelに読み込ませる前にpanel.jsonとブックのSHA-256を照合する。
 [RssChartの公式仕様](https://marketspeed.jp/ms2_rss/onlinehelp/ohm_002/ohm_002_04.html)
 
+## 両社のデータを同じ分析で使う
+
+31銘柄の研究取得が終了すると、受信した日本日付ごとに `data/research/shared-market/YYYY-MM-DD.sqlite` を更新する。
+場中や再作成時は `python -m trading_system.research.shared_market --date YYYY-MM-DD` で両社の保存済み原本から再生成できる。
+分析中にWindowsがファイル置換を拒否した場合は分析ソフトを閉じて再作成する。公開結果は取得元別のpublish.jsonに残る。
+`quotes` の銘柄・最終取引時刻・受信完了時刻・株価・累計出来高・最良気配と数量の列は共通。
+楽天の最良気配とカブコムの各最大10本は `book_levels` に売り／買いを揃えて保存する。
+楽天の `minute_bars`・`market_indexes` も同じファイルに格納する。取れなかった値はNULL、取得元はsource列に残す。
+同じ銘柄の2社の累計出来高を足さない。銘柄比較はsymbolで、J-Quants日足との照合はjquants_codeで行う。
+known_atはUTCの受信完了時刻。任意時点での比較には `latest_asof(db, aware_datetime)` を使い、
+その時点までに受信済みの各社の最終観測を取得する。古い気配・拒否された観測は品質・時刻を別途判定する。
+この共通表の対象は31銘柄の新しい研究取得で、以前のトヨタ単独確認と日足の全履歴は別の保存先にある。
+
 ## スイング研究
 
 各営業日16:30以降に `scripts/save_swing_day.cmd` を開くと、公式J-Quantsから当日の日足（全銘柄）・

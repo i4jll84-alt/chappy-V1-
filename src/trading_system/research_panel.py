@@ -329,6 +329,9 @@ def main():
     parser.add_argument("--snapshot-now", action="store_true")
     args = parser.parse_args()
     run(PROJECT / "data/rss-panel", args.requested, args.resume, one_pass=args.snapshot_now)
+    from trading_system.research.shared_market import after_stop
+
+    after_stop(PROJECT, datetime.fromtimestamp(args.requested / 1e9, JST).date(), "rakuten")
 
 
 if __name__ == "__main__":
