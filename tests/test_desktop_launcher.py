@@ -110,23 +110,114 @@ def test_mufg_lock_prevents_resume_and_stop_is_preserved(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "broker,module", [("panel", "research_panel"), ("kabu_panel", "kabu_study")]
+    "mode,expected",
+    [
+        ("rakuten", {"panel": "research_panel"}),
+        ("mufg_esmart", {"kabu_panel": "kabu_study"}),
+        ("both", {"panel": "research_panel", "kabu_panel": "kabu_study"}),
+    ],
 )
 @pytest.mark.parametrize("hour,once", [(9, False), (20, True)])
-def test_research_buttons_choose_daytime_or_after_close(
-    tmp_path, monkeypatch, broker, module, hour, once
+def test_selected_research_uses_click_time_and_remembers_choice(
+    tmp_path, monkeypatch, mode, expected, hour, once
 ):
     when = datetime.fromisoformat(f"2026-11-04T{hour:02}:00:00+09:00")
     monkeypatch.setattr(launcher, "time_ns", lambda: int(when.timestamp() * 1e9))
     spawn = Mock()
+    spawn.return_value.poll.return_value = None
     monkeypatch.setattr(launcher.subprocess, "Popen", spawn)
-    view = SimpleNamespace(
-        project=tmp_path, children={}, stopping=set(), busy=lambda _: False, message=Mock()
-    )
-    launcher.Launcher.start_panel(view, broker)
-    args = spawn.call_args.args[0]
-    assert ("--snapshot-now" in args) == once and "trading_system." + module in args
-    assert view.children[broker] is spawn.return_value
+    view = research_view(tmp_path, mode)
+    view.start_research()
+    assert list(view.children) == list(expected)
+    assert spawn.call_count == len(expected)
+    for module, call in zip(expected.values(), spawn.call_args_list, strict=True):
+        args = call.args[0]
+        assert ("--snapshot-now" in args) == once and "trading_system." + module in args
+        assert args[args.index("--requested") + 1] == str(launcher.time_ns())
+    assert json.loads(view.settings_path.read_text("utf-8"))["brokers"] == view.selected()
+    view.start_research()
+    assert spawn.call_count == len(expected)
+
+
+def research_view(tmp_path, mode):
+    view = launcher.Launcher.__new__(launcher.Launcher)
+    view.project = tmp_path
+    view.settings_path = tmp_path / "settings.json"
+    view.settings = settings()
+    view.mode = Mock()
+    view.mode.get.return_value = mode
+    view.children = {}
+    view.stopping = set()
+    view.message = Mock()
+    return view
+
+
+@pytest.mark.parametrize(
+    "state", ["rakuten_already_running", "kabu_check_running", "rakuten_spawn_failed"]
+)
+def test_both_research_reports_each_selected_result(tmp_path, monkeypatch, state):
+    view = research_view(tmp_path, "both")
+    if state == "rakuten_already_running":
+        view.children["panel"] = Mock()
+        view.children["panel"].poll.return_value = None
+    if state == "kabu_check_running":
+        view.children["mufg_esmart"] = Mock()
+        view.children["mufg_esmart"].poll.return_value = None
+    spawn = Mock()
+    if state == "rakuten_spawn_failed":
+        spawn.side_effect = [OSError("fixture"), Mock()]
+    monkeypatch.setattr(launcher.subprocess, "Popen", spawn)
+    view.start_research()
+    message = view.message.set.call_args.args[0]
+    assert all(launcher.NAMES[k] in message for k in launcher.RESEARCH.values())
+    if state == "rakuten_spawn_failed":
+        assert set(view.children) == {"kabu_panel"} and "起動できません" in message
+    elif state == "kabu_check_running":
+        assert set(view.children) == {"panel", "mufg_esmart"} and "接続確認中" in message
+    else:
+        assert set(view.children) == {"panel", "kabu_panel"} and "起動済み" in message
+
+
+def test_launcher_buttons_use_selection_for_research_and_connection(tmp_path, monkeypatch):
+    import tkinter as tk
+    from tkinter import ttk
+
+    check, study = Mock(), Mock()
+    monkeypatch.setattr(launcher.Launcher, "start", check)
+    monkeypatch.setattr(launcher.Launcher, "start_research", study)
+    monkeypatch.setattr(launcher.Launcher, "refresh", Mock())
+    window = tk.Tk()
+    window.withdraw()
+    try:
+        view = launcher.Launcher(window, tmp_path)
+        widgets = [window]
+        for widget in widgets:
+            widgets.extend(widget.winfo_children())
+        buttons = {w.cget("text"): w for w in widgets if isinstance(w, ttk.Button)}
+        research_buttons = [label for label in buttons if "研究取得" in label]
+        assert research_buttons == ["選択した証券会社の研究取得（31銘柄）"]
+        assert "選択した証券会社を開始" not in buttons
+        next(
+            w for w in widgets if isinstance(w, ttk.Radiobutton) and w.cget("text") == "両方"
+        ).invoke()
+        assert view.selected() == list(launcher.BROKERS)
+        buttons[research_buttons[0]].invoke()
+        study.assert_called_once()
+        check.assert_not_called()
+        buttons["接続を確認（トヨタ1銘柄）"].invoke()
+        check.assert_called_once()
+    finally:
+        window.destroy()
+
+
+def test_kabu_research_lock_is_not_shown_as_a_running_connection_check(tmp_path):
+    view = research_view(tmp_path, "both")
+    view.window = Mock()
+    view.status = {b: Mock() for b in launcher.CAPTURES}
+    view.busy = lambda broker: broker in ("kabu_panel", "mufg_esmart")
+    view.refresh()
+    assert "停止中" in view.status["mufg_esmart"].set.call_args.args[0]
+    assert "起動中" in view.status["kabu_panel"].set.call_args.args[0]
 
 
 def test_refresh_reports_only_current_rakuten_recovery(tmp_path):

@@ -100,7 +100,7 @@ try {
     Write-Host '日本時間16:00に取得を止め、保存・照合して終了します。保存中は画面を閉じずにお待ちください。'
     Write-Host 'PCのスリープ中は処理できません。16時を過ぎて復帰した場合は、取得を再開せず保存して停止します。'
     Write-Host '仮想取引は固定シナリオ1往復だけ。完了後も株価取得を継続します。'
-    Write-Host '停止は共通起動画面の「両方の取得を停止」、またはCtrl+Cを使用してください。'
+    Write-Host '停止は共通起動画面の「すべての取得を停止」、またはCtrl+Cを使用してください。'
     Write-Host ('状態・保存先: ' + $rssData)
     & $rssPython -m trading_system.rss_continuous --workbook $rssWorkbook --code 7203.T --root $rssData --paper --cycles $Cycles --wait-for-current-date --resume-stop $ResumeStop
     if ($LASTEXITCODE -ne 0) { Write-Host '終了状態を確認してください。二重起動時は既存の取得が優先されます。' -ForegroundColor Yellow }

@@ -12,10 +12,11 @@ from zoneinfo import ZoneInfo
 from trading_system.rss_stop import publish_stop, stop_ticket
 
 BROKERS = ("rakuten", "mufg_esmart")
-CAPTURES = (*BROKERS, "panel", "kabu_panel")
+RESEARCH = {"rakuten": "panel", "mufg_esmart": "kabu_panel"}
+CAPTURES = (*BROKERS, *RESEARCH.values())
 NAMES = {
-    "rakuten": "楽天証券",
-    "mufg_esmart": "カブコム / 三菱UFJ eスマート証券",
+    "rakuten": "楽天 接続確認",
+    "mufg_esmart": "カブコム 接続確認",
     "panel": "楽天31銘柄研究",
     "kabu_panel": "カブコム31銘柄研究",
 }
@@ -204,13 +205,13 @@ class Launcher:
         style.theme_use("clam")
         style.configure("TButton", padding=(12, 8))
         style.configure("Title.TLabel", font=("Yu Gothic UI", 20, "bold"))
-        frame = ttk.Frame(window, padding=24)
+        frame = ttk.Frame(window, padding=(24, 16))
         frame.pack(fill="both", expand=True)
         ttk.Label(frame, text="個別株データ取得", style="Title.TLabel").pack(anchor="w")
-        ttk.Label(frame, text="楽天証券とカブコムを、ひとつの画面から操作します。").pack(
-            anchor="w", pady=(4, 15)
-        )
-        selection = ttk.LabelFrame(frame, text="起動する証券会社", padding=12)
+        ttk.Label(
+            frame, text="毎朝は証券会社を選び、「選択した証券会社の研究取得」を1回押します。"
+        ).pack(anchor="w", pady=(4, 15))
+        selection = ttk.LabelFrame(frame, text="対象の証券会社", padding=12)
         selection.pack(fill="x")
         current = self.settings["brokers"]
         self.mode = tk.StringVar(value="both" if len(current) == 2 else current[0])
@@ -224,9 +225,6 @@ class Launcher:
             )
         preparation = ttk.Frame(frame)
         preparation.pack(fill="x", pady=12)
-        ttk.Button(preparation, text="楽天のExcelを開く", command=self.open_workbook).pack(
-            side="left", padx=(0, 7)
-        )
         ttk.Button(
             preparation,
             text="MARKET SPEED II",
@@ -245,31 +243,31 @@ class Launcher:
         ).pack(anchor="w", pady=(0, 12))
         actions = ttk.Frame(frame)
         actions.pack(fill="x")
-        ttk.Button(actions, text="選択した証券会社を開始", command=self.start).pack(
-            side="left", padx=(0, 10)
-        )
+        ttk.Button(
+            actions, text="選択した証券会社の研究取得（31銘柄）", command=self.start_research
+        ).pack(side="left", padx=(0, 10))
         ttk.Button(actions, text="すべての取得を停止", command=self.stop_all).pack(side="left")
         ttk.Button(actions, text="設定", command=self.configure).pack(side="right")
-        study = ttk.Frame(frame)
-        study.pack(fill="x", pady=(6, 0))
-        ttk.Button(study, text="楽天31銘柄の研究取得", command=self.start_panel).pack(
+        diagnostics = ttk.LabelFrame(frame, text="データが届かないとき", padding=(8, 4))
+        diagnostics.pack(fill="x", pady=(8, 0))
+        ttk.Button(diagnostics, text="接続を確認（トヨタ1銘柄）", command=self.start).pack(
             side="left", padx=(0, 10)
         )
         ttk.Button(
-            study, text="カブコム31銘柄の研究取得", command=lambda: self.start_panel("kabu_panel")
+            diagnostics, text="楽天の接続確認用Excelを開く", command=self.open_workbook
         ).pack(side="left")
         status_frame = ttk.LabelFrame(frame, text="取得状態", padding=12)
-        status_frame.pack(fill="x", pady=15)
+        status_frame.pack(fill="x", pady=10)
         self.status = {broker: tk.StringVar() for broker in CAPTURES}
         self.panel_requested_ns = 0
-        for broker in CAPTURES:
+        for broker in (*RESEARCH.values(), *BROKERS):
             ttk.Label(status_frame, textvariable=self.status[broker], wraplength=710).pack(
-                anchor="w", pady=5
+                anchor="w", pady=3
             )
         ttk.Label(
             frame,
             text=(
-                "通常の開始は7203の接続確認。研究ボタンは30銘柄＋トヨタの分足と気配を記録します。\n"
+                "研究取得では楽天の分足・気配、カブコムの板を記録します。楽天の研究用Excelは自動で開きます。\n"
                 "場中の継続取得は16時で終了。引け後の研究ボタンは市況を一度読み取ります。\n"
                 "現在は取得・ペーパートレード用です。実発注は無効です。"
             ),
@@ -277,7 +275,7 @@ class Launcher:
             justify="left",
         ).pack(anchor="w")
         self.message = tk.StringVar(
-            value="証券アプリのログイン後に、開始する対象を選んでください。"
+            value="両社を記録する場合は、両方の証券アプリにログインして「両方」を選んでください。"
         )
         ttk.Label(frame, textvariable=self.message, foreground="#7A233B", wraplength=740).pack(
             anchor="w", pady=(12, 0)
@@ -349,6 +347,11 @@ class Launcher:
                 resume_stop = stop_ticket(marker, requested)
             # Check all selections before launching any, so partial starts are explicit.
             for broker in chosen:
+                if broker == "mufg_esmart" and self.busy("kabu_panel"):
+                    messagebox.showinfo(
+                        "接続確認", "カブコムの研究取得中です。接続確認は取得終了後に行えます。"
+                    )
+                    return
                 if self.busy(broker):
                     messagebox.showinfo(
                         "起動済み", NAMES[broker] + "は起動中です。二重起動しません。"
@@ -391,55 +394,73 @@ class Launcher:
                 )
                 if broker == "rakuten":
                     self.rakuten_requested_ns = requested
-            self.message.set("開始しました。取得の終了時刻以降は、保存済みデータの照合を行います。")
+            self.message.set(
+                "トヨタ1銘柄の接続確認を開始しました。取得終了時刻以降は保存記録を確認します。"
+            )
         except (OSError, ValueError):
             messagebox.showerror(
                 "起動",
                 "起動できませんでした。既に起動した取得は状態欄と停止ボタンで確認してください。",
             )
 
-    def start_panel(self, broker="panel"):
+    def start_research(self):
         from tkinter import messagebox
 
         requested = time_ns()
         late = requested // 1_000_000_000 >= rss_cutoff(requested)
+        chosen = self.selected()
+        settings = {**self.settings, "brokers": chosen}
         try:
-            if self.busy(broker) or (broker == "kabu_panel" and self.busy("mufg_esmart")):
-                self.message.set("同じ取得元が起動中です。既存の取得の終了を確認してください。")
-                return
-            root = collector_root(self.project, broker)
-            marker = root / "STOP"
-            resume = stop_ticket(marker if marker.exists() else root / "STOP.resuming", requested)
-            self.children[broker] = subprocess.Popen(
-                [
-                    str(self.project / ".venv/Scripts/python.exe"),
-                    "-B",
-                    "-X",
-                    "utf8",
-                    "-m",
-                    "trading_system.research_panel"
-                    if broker == "panel"
-                    else "trading_system.kabu_study",
-                    "--requested",
-                    str(requested),
-                    "--resume",
-                    resume,
-                    *(["--snapshot-now"] if late else []),
-                ],
-                cwd=self.project,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
-            if broker == "panel":
-                self.panel_requested_ns = requested
-            self.stopping.discard(broker)
-            self.message.set(
-                NAMES[broker]
-                + ("：引け後の記録を取得して終了します。" if late else "：研究取得を開始しました。")
-            )
+            save_settings(self.settings_path, settings)
         except (OSError, ValueError):
             messagebox.showerror(
-                "研究取得", "起動できません。研究用ブックと保存先を確認してください。"
+                "研究取得", "証券会社の選択を保存できません。設定と保存先を確認してください。"
             )
+            return
+        self.settings = settings
+        messages = []
+        for source in chosen:
+            broker = RESEARCH[source]
+            try:
+                if self.busy(broker):
+                    result = "停止処理中" if broker in self.stopping else "起動済み"
+                elif source == "mufg_esmart" and self.busy(source):
+                    result = "接続確認中のため開始できません"
+                else:
+                    self.launch_research(broker, requested, late)
+                    result = "引け後の一括取得を開始" if late else "開始"
+            except (OSError, ValueError):
+                result = "起動できません。設定と保存先を確認してください"
+            messages.append(f"{NAMES[broker]}：{result}")
+        self.message.set(" ／ ".join(messages))
+
+    def launch_research(self, broker, requested, late):
+        root = collector_root(self.project, broker)
+        marker = root / "STOP"
+        resume = stop_ticket(marker if marker.exists() else root / "STOP.resuming", requested)
+        module = (
+            "trading_system.research_panel" if broker == "panel" else "trading_system.kabu_study"
+        )
+        self.children[broker] = subprocess.Popen(
+            [
+                str(self.project / ".venv/Scripts/python.exe"),
+                "-B",
+                "-X",
+                "utf8",
+                "-m",
+                module,
+                "--requested",
+                str(requested),
+                "--resume",
+                resume,
+                *(["--snapshot-now"] if late else []),
+            ],
+            cwd=self.project,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        if broker == "panel":
+            self.panel_requested_ns = requested
+        self.stopping.discard(broker)
 
     def stop_all(self):
         from tkinter import messagebox
@@ -529,11 +550,15 @@ class Launcher:
         for broker in CAPTURES:
             try:
                 child = self.children.get(broker)
-                if self.busy(broker):
+                # The kabu research collector also holds the connection check's writer lock.
+                active = self.busy(broker)
+                if broker == "mufg_esmart" and active and self.busy("kabu_panel"):
+                    active = child is not None and child.poll() is None
+                if active:
                     text = (
                         "停止処理中 / 保存完了を待っています"
                         if broker in self.stopping
-                        else "起動中（接続確認・保存処理を含む）"
+                        else "起動中（準備・保存処理を含む）"
                     )
                     if broker == "rakuten" and child is not None and child.poll() is None:
                         detail = rakuten_progress(self.project, self.rakuten_requested_ns)
