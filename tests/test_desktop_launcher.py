@@ -194,6 +194,13 @@ def test_launcher_buttons_use_selection_for_research_and_connection(tmp_path, mo
         for widget in widgets:
             widgets.extend(widget.winfo_children())
         buttons = {w.cget("text"): w for w in widgets if isinstance(w, ttk.Button)}
+        app_row = buttons["MARKET SPEED II"].master.pack_slaves()
+        assert [b.cget("text") for b in app_row] == [
+            "MARKET SPEED II",
+            "kabuステーション",
+            "楽天の接続確認用Excelを開く",
+        ]
+        assert all(str(b.pack_info()["side"]) == "left" for b in app_row)
         research_buttons = [label for label in buttons if "研究取得" in label]
         assert research_buttons == ["選択した証券会社の研究取得（31銘柄）"]
         assert "選択した証券会社を開始" not in buttons

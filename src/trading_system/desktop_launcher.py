@@ -235,6 +235,9 @@ class Launcher:
             text="kabuステーション",
             command=lambda: self.open_app("mufg_app"),
         ).pack(side="left", padx=7)
+        ttk.Button(
+            preparation, text="楽天の接続確認用Excelを開く", command=self.open_workbook
+        ).pack(side="left", padx=7)
         ttk.Label(
             frame,
             text="楽天：ExcelのRSSを「接続中・発注不可」にして開始します。\nカブコム：APIパスワードは開始時に入力します。保存しません。",
@@ -253,9 +256,6 @@ class Launcher:
         ttk.Button(diagnostics, text="接続を確認（トヨタ1銘柄）", command=self.start).pack(
             side="left", padx=(0, 10)
         )
-        ttk.Button(
-            diagnostics, text="楽天の接続確認用Excelを開く", command=self.open_workbook
-        ).pack(side="left")
         status_frame = ttk.LabelFrame(frame, text="取得状態", padding=12)
         status_frame.pack(fill="x", pady=10)
         self.status = {broker: tk.StringVar() for broker in CAPTURES}
