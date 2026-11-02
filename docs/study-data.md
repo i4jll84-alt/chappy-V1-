@@ -49,8 +49,10 @@ known_atはUTCの受信完了時刻。任意時点での比較には `latest_aso
 
 ## スイング研究
 
-各営業日16:30以降に `scripts/save_swing_day.cmd` を開くと、公式J-Quantsから当日の日足（全銘柄）・
+各営業日16:30以降に共通起動画面の「夜の作業（16:30以降）」で「当日分を保存」を押すと、
+公式J-Quantsから当日の日足（全銘柄）・
 同日の銘柄一覧・TOPIX・営業日区分・公表済み決算を取得する。Excelの起動や証券会社へのログインは不要。
+進み具合と結果は「稼働状態」の「夜の当日分保存」で確認する。`scripts/save_swing_day.cmd` からも同じ処理を実行できる。
 休場日はカレンダー確認で終わる。日付指定は `python -m trading_system.research.swing_daily --date YYYY-MM-DD`。
 後日判明した訂正や、初回取得後の追加開示を収録する場合は `--refresh` を指定し、新たな観測として保存する。
 日々の保存先は `data/jquants/daily-snapshots` と既存のreference・market_financial。

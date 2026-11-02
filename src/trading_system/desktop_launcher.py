@@ -3,7 +3,8 @@
 import json
 import os
 import subprocess
-from datetime import UTC, datetime
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime, time
 from pathlib import Path
 from time import time_ns
 from uuid import uuid4
@@ -73,6 +74,20 @@ def collector_root(project, broker):
     return project / "data" / ROOTS[broker]
 
 
+def market_day_settings(project):
+    from trading_system.settings import Settings
+
+    settings = Settings.load(project / "config/stage1.toml")
+    settings.data_root = project / settings.data_root
+    return settings
+
+
+def save_market_day(project, day):
+    from trading_system.research.swing_daily import collect
+
+    return collect(day, market_day_settings(project))
+
+
 def rakuten_progress(project, requested_ns):
     """Only display a report from the current launch, never yesterday's status."""
     try:
@@ -100,11 +115,14 @@ def rakuten_progress(project, requested_ns):
 
 
 def collector_active(project, broker):
+    name = "collector.lock" if broker == "rakuten" else "writer.lock"
+    return lock_active(collector_root(project, broker) / name)
+
+
+def lock_active(lock):
     """Probe the OS lock; old status files alone are never evidence of a running process."""
     import msvcrt
 
-    name = "collector.lock" if broker == "rakuten" else "writer.lock"
-    lock = collector_root(project, broker) / name
     if not lock.exists():
         return False
     with lock.open("r+b") as handle:
@@ -186,6 +204,10 @@ class Launcher:
         self.window, self.project = window, project
         self.children = {}
         self.stopping = set()
+        self.daily_executor = ThreadPoolExecutor(max_workers=1)
+        self.daily_task = None
+        self.daily_root = None
+        self.daily_seen = None
         self.rakuten_requested_ns = None
         self.settings_path = project / "data" / "desktop-launcher" / "settings.json"
         self.workbook = Path(os.environ["USERPROFILE"]) / "Documents/RakutenRSS/RSS接続確認.xlsx"
@@ -210,7 +232,7 @@ class Launcher:
         ttk.Label(frame, text="個別株データ取得", style="Title.TLabel").pack(anchor="w")
         ttk.Label(
             frame, text="毎朝は証券会社を選び、「選択した証券会社の研究取得」を1回押します。"
-        ).pack(anchor="w", pady=(4, 15))
+        ).pack(anchor="w", pady=(4, 8))
         selection = ttk.LabelFrame(frame, text="対象の証券会社", padding=12)
         selection.pack(fill="x")
         current = self.settings["brokers"]
@@ -224,7 +246,7 @@ class Launcher:
                 side="left", padx=(0, 30)
             )
         preparation = ttk.Frame(frame)
-        preparation.pack(fill="x", pady=12)
+        preparation.pack(fill="x", pady=8)
         ttk.Button(
             preparation,
             text="MARKET SPEED II",
@@ -251,19 +273,30 @@ class Launcher:
         ).pack(side="left", padx=(0, 10))
         ttk.Button(actions, text="すべての取得を停止", command=self.stop_all).pack(side="left")
         ttk.Button(actions, text="設定", command=self.configure).pack(side="right")
-        diagnostics = ttk.LabelFrame(frame, text="データが届かないとき", padding=(8, 4))
-        diagnostics.pack(fill="x", pady=(8, 0))
+        other_actions = ttk.Frame(frame)
+        other_actions.pack(fill="x", pady=(8, 0))
+        evening = ttk.LabelFrame(other_actions, text="夜の作業（16:30以降）", padding=(8, 4))
+        evening.pack(side="left", fill="both", expand=True, padx=(0, 8))
+        ttk.Button(evening, text="当日分を保存", command=self.start_daily_save).pack(side="left")
+        ttk.Label(evening, text="証券アプリ・Excelは不要です。").pack(side="left", padx=6)
+        diagnostics = ttk.LabelFrame(other_actions, text="データが届かないとき", padding=(8, 4))
+        diagnostics.pack(side="right", fill="y")
         ttk.Button(diagnostics, text="接続を確認（トヨタ1銘柄）", command=self.start).pack(
             side="left", padx=(0, 10)
         )
-        status_frame = ttk.LabelFrame(frame, text="取得状態", padding=12)
+        status_frame = ttk.LabelFrame(frame, text="稼働状態", padding=12)
         status_frame.pack(fill="x", pady=10)
         self.status = {broker: tk.StringVar() for broker in CAPTURES}
         self.panel_requested_ns = 0
         for broker in (*RESEARCH.values(), *BROKERS):
             ttk.Label(status_frame, textvariable=self.status[broker], wraplength=710).pack(
-                anchor="w", pady=3
+                anchor="w", pady=2
             )
+        daily_row = ttk.Frame(status_frame)
+        daily_row.pack(anchor="w", pady=2)
+        ttk.Label(daily_row, text="夜の当日分保存：").pack(side="left")
+        self.daily_status = tk.StringVar(value="待機中")
+        ttk.Label(daily_row, textvariable=self.daily_status, wraplength=540).pack(side="left")
         ttk.Label(
             frame,
             text=(
@@ -285,6 +318,75 @@ class Launcher:
 
     def selected(self):
         return list(BROKERS) if self.mode.get() == "both" else [self.mode.get()]
+
+    def start_daily_save(self):
+        if self.daily_task is not None:
+            self.daily_status.set("保存中です。完了までお待ちください。")
+            return
+        now = datetime.fromtimestamp(time_ns() // 1_000_000_000, ZoneInfo("Asia/Tokyo"))
+        if now.time() < time(16, 30):
+            self.daily_status.set("当日分は16:30以降に保存できます。")
+            return
+        try:
+            self.daily_task = self.daily_executor.submit(save_market_day, self.project, now.date())
+        except RuntimeError:
+            self.daily_status.set("保存を開始できません。画面を開き直してください。")
+            return
+        self.daily_status.set(f"{now:%m/%d} の日足・決算などを保存中です。")
+
+    def refresh_daily_save(self):
+        if self.daily_task is None:
+            self.read_daily_state()
+            return
+        if not self.daily_task.done():
+            return
+        try:
+            report = self.daily_task.result()
+            if report["state"] == "closed_day":
+                message = f"{report['date']} は休場日です。"
+            elif report["state"] == "complete":
+                message = f"{report['date']} 保存完了（日足 {report['daily_rows']:,} 銘柄）"
+            else:
+                message = "保存を確認できません。時間をおいて再実行してください。"
+        except Exception as exc:
+            # Only display known messages. Provider errors may contain request details.
+            reasons = {
+                "market_data_key_missing": "J-QuantsのAPIキー設定を確認してください。",
+                "broker_state_already_open": "別の保存処理が実行中です。完了をお待ちください。",
+                "daily_not_yet_available": "日足が未配信です。時間をおいて再実行してください。",
+            }
+            message = reasons.get(str(exc), "保存に失敗しました。通信と設定を確認してください。")
+        self.daily_task = None
+        self.daily_status.set(message)
+
+    def read_daily_state(self):
+        today = datetime.fromtimestamp(time_ns() // 1_000_000_000, ZoneInfo("Asia/Tokyo")).date()
+        try:
+            if self.daily_root is None:
+                self.daily_root = market_day_settings(self.project).data_root / "daily-snapshots"
+            busy = lock_active(self.daily_root / "writer.lock")
+            path = self.daily_root / today.isoformat() / "last_collection.json"
+            try:
+                modified = path.stat().st_mtime_ns
+            except FileNotFoundError:
+                modified = None
+            observation = (today, busy, modified)
+            if observation == self.daily_seen:
+                return
+            if busy:
+                message = "保存中（別の画面から実行）"
+            else:
+                message = "待機中"
+                if modified is not None:
+                    saved = json.loads(path.read_bytes())
+                    if saved["state"] != "complete" or saved["date"] != today.isoformat():
+                        raise ValueError("unexpected_daily_report")
+                    message = f"停止中 ／ 本日の保存記録あり（日足 {saved['daily_rows']:,} 銘柄）"
+            self.daily_seen = observation
+        except (OSError, ValueError, KeyError, TypeError):
+            self.daily_seen = None
+            message = "稼働状態を確認できません。設定と保存先を確認してください。"
+        self.daily_status.set(message)
 
     def open_workbook(self, cutoff=None):
         from tkinter import messagebox
@@ -481,7 +583,7 @@ class Launcher:
             )
         else:
             self.message.set(
-                "停止を要求しました。入力画面は自動で閉じます。保存完了までお待ちください。"
+                "証券会社の取得に停止を要求しました。夜の当日分保存は完了までお待ちください。"
             )
 
     def configure(self):
@@ -602,11 +704,15 @@ class Launcher:
             except OSError:
                 text = "状態を確認できません。取得画面を確認してください。"
             self.status[broker].set(NAMES[broker] + "：" + text)
+        self.refresh_daily_save()
         self.window.after(2000, self.refresh)
 
     def close(self):
         from tkinter import messagebox
 
+        if self.daily_task is not None:
+            messagebox.showinfo("当日分を保存", "夜の保存結果が表示されてから閉じてください。")
+            return
         try:
             active = any(self.busy(b) for b in CAPTURES)
         except OSError:
@@ -617,6 +723,7 @@ class Launcher:
                 "取得または入力待ちが残っています。停止ボタンを押し、保存完了後に終了してください。",
             )
         else:
+            self.daily_executor.shutdown(wait=False)
             self.window.destroy()
 
 

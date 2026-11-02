@@ -1,4 +1,5 @@
 import json
+from concurrent.futures import Future
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -182,9 +183,10 @@ def test_launcher_buttons_use_selection_for_research_and_connection(tmp_path, mo
     import tkinter as tk
     from tkinter import ttk
 
-    check, study = Mock(), Mock()
+    check, study, daily = Mock(), Mock(), Mock()
     monkeypatch.setattr(launcher.Launcher, "start", check)
     monkeypatch.setattr(launcher.Launcher, "start_research", study)
+    monkeypatch.setattr(launcher.Launcher, "start_daily_save", daily)
     monkeypatch.setattr(launcher.Launcher, "refresh", Mock())
     window = tk.Tk()
     window.withdraw()
@@ -213,8 +215,116 @@ def test_launcher_buttons_use_selection_for_research_and_connection(tmp_path, mo
         check.assert_not_called()
         buttons["接続を確認（トヨタ1銘柄）"].invoke()
         check.assert_called_once()
+        evening_button = buttons["当日分を保存"]
+        assert evening_button.master.cget("text") == "夜の作業（16:30以降）"
+        evening_button.invoke()
+        daily.assert_called_once()
+        state_label = next(
+            w for w in widgets if isinstance(w, ttk.Label) and w.cget("text") == "夜の当日分保存："
+        )
+        assert state_label.master.master.cget("text") == "稼働状態"
+        assert any(
+            str(w.cget("textvariable")) == str(view.daily_status)
+            for w in state_label.master.winfo_children()
+        )
     finally:
         window.destroy()
+
+
+def daily_view(tmp_path):
+    view = launcher.Launcher.__new__(launcher.Launcher)
+    view.project = tmp_path
+    view.daily_executor = Mock()
+    view.daily_task = None
+    view.daily_seen = None
+    view.daily_root = tmp_path / "daily-snapshots"
+    view.daily_status = Mock()
+    view.window = Mock()
+    return view
+
+
+def test_daily_save_launch_time_double_click_and_close(tmp_path, monkeypatch):
+    view = daily_view(tmp_path)
+    edge = datetime.fromisoformat("2026-11-04T16:30:00+09:00")
+    stamp = int(edge.timestamp()) * 10**9
+    monkeypatch.setattr(launcher, "time_ns", lambda: stamp - 1)
+    view.start_daily_save()
+    view.daily_executor.submit.assert_not_called()
+    assert "16:30以降" in view.daily_status.set.call_args.args[0]
+    monkeypatch.setattr(launcher, "time_ns", lambda: stamp)
+    task = Future()
+    view.daily_executor.submit.return_value = task
+    view.start_daily_save()
+    view.start_daily_save()
+    view.daily_executor.submit.assert_called_once_with(
+        launcher.save_market_day, tmp_path, edge.date()
+    )
+    view.refresh_daily_save()
+    assert "保存中" in view.daily_status.set.call_args.args[0]
+    info = Mock()
+    monkeypatch.setattr("tkinter.messagebox.showinfo", info)
+    view.close()
+    info.assert_called_once()
+    view.window.destroy.assert_not_called()
+    task.set_result({"state": "complete", "date": "2026-11-04", "daily_rows": 1234})
+    view.refresh_daily_save()
+    assert view.daily_task is None
+    assert "保存完了（日足 1,234 銘柄）" in view.daily_status.set.call_args.args[0]
+
+
+@pytest.mark.parametrize(
+    "result,text",
+    [
+        ({"state": "closed_day", "date": "2026-11-03"}, "休場日"),
+        (ValueError("daily_not_yet_available"), "未配信"),
+        (ValueError("broker_state_already_open"), "別の保存処理"),
+        (RuntimeError("private fixture details"), "保存に失敗"),
+    ],
+)
+def test_daily_save_reports_outcome_and_allows_retry(tmp_path, result, text):
+    view = daily_view(tmp_path)
+    view.daily_task = Future()
+    if isinstance(result, Exception):
+        view.daily_task.set_exception(result)
+    else:
+        view.daily_task.set_result(result)
+    view.refresh_daily_save()
+    assert view.daily_task is None
+    assert text in view.daily_status.set.call_args.args[0]
+    assert "private fixture" not in view.daily_status.set.call_args.args[0]
+
+
+def test_daily_state_follows_external_lock_and_current_date_report(tmp_path, monkeypatch):
+    view = daily_view(tmp_path)
+    now = datetime.fromisoformat("2026-11-04T18:00:00+09:00")
+    stamp = int(now.timestamp()) * 10**9
+    monkeypatch.setattr(launcher, "time_ns", lambda: stamp)
+    view.refresh_daily_save()
+    assert view.daily_status.set.call_args.args == ("待機中",)
+    with single_writer(view.daily_root):
+        view.refresh_daily_save()
+        assert "保存中" in view.daily_status.set.call_args.args[0]
+    view.refresh_daily_save()
+    assert view.daily_status.set.call_args.args == ("待機中",)
+    path = view.daily_root / "2026-11-04/last_collection.json"
+    path.parent.mkdir()
+    path.write_text(json.dumps({"state": "complete", "date": "2026-11-04", "daily_rows": 12}))
+    view.refresh_daily_save()
+    assert "本日の保存記録あり" in view.daily_status.set.call_args.args[0]
+    monkeypatch.setattr(launcher, "time_ns", lambda: stamp + 86400 * 10**9)
+    view.refresh_daily_save()
+    assert view.daily_status.set.call_args.args == ("待機中",)
+
+
+def test_daily_button_calls_same_collector_with_project_settings(tmp_path, monkeypatch):
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config/stage1.toml").write_text('data_root = "local-jquants"\n')
+    collect = Mock(return_value={"state": "closed_day"})
+    monkeypatch.setattr("trading_system.research.swing_daily.collect", collect)
+    day = datetime(2026, 11, 3).date()
+    assert launcher.save_market_day(tmp_path, day) == collect.return_value
+    received_day, settings = collect.call_args.args
+    assert received_day == day and settings.data_root == tmp_path / "local-jquants"
 
 
 def test_kabu_research_lock_is_not_shown_as_a_running_connection_check(tmp_path):
@@ -222,6 +332,7 @@ def test_kabu_research_lock_is_not_shown_as_a_running_connection_check(tmp_path)
     view.window = Mock()
     view.status = {b: Mock() for b in launcher.CAPTURES}
     view.busy = lambda broker: broker in ("kabu_panel", "mufg_esmart")
+    view.refresh_daily_save = Mock()
     view.refresh()
     assert "停止中" in view.status["mufg_esmart"].set.call_args.args[0]
     assert "起動中" in view.status["kabu_panel"].set.call_args.args[0]
@@ -240,6 +351,7 @@ def test_refresh_reports_only_current_rakuten_recovery(tmp_path):
         stopping={"rakuten"},
         window=Mock(),
         refresh=Mock(),
+        refresh_daily_save=Mock(),
         busy=lambda broker: broker == "rakuten",
         status={b: Mock() for b in launcher.CAPTURES},
         rakuten_requested_ns=int(requested.timestamp()) * 1_000_000_000,
