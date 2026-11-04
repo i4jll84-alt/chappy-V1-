@@ -2,7 +2,6 @@
 
 import argparse
 import gzip
-import hashlib
 import json
 import math
 import os
@@ -15,6 +14,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from trading_system.brokers.locking import single_writer
+from trading_system.research_workbook import validate_workbook
 from trading_system.rss_stop import can_start
 from trading_system.storage.store import atomic_write, canonical
 
@@ -38,12 +38,33 @@ def panel_symbols(config):
 
 
 def configuration(root):
-    config = json.loads((root / "panel.json").read_bytes())
-    symbols = panel_symbols(config)
+    try:
+        config = json.loads((root / "panel.json").read_bytes())
+        symbols = panel_symbols(config)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise ValueError("invalid_panel_configuration") from exc
     book = root / BOOK_NAME
-    if hashlib.sha256(book.read_bytes()).hexdigest() != config["workbook_sha256"]:
-        raise ValueError("research_workbook_changed")
+    validate_workbook(book, symbols)
     return symbols, book
+
+
+FAILURE_MESSAGES = {
+    "invalid_panel_configuration": "31銘柄の設定ファイルを確認してください。",
+    "research_workbook_unreadable": "研究用Excelを読み取れません。保存先を確認してください。",
+    "invalid_research_workbook": "研究用Excelのファイル形式を確認してください。",
+    "research_workbook_layout_changed": "研究用Excelの銘柄・シート・見出しが設定と一致しません。",
+    "research_workbook_formulas_changed": "研究用Excelの取得用数式が設定と一致しません。",
+    "research_storage_error": "研究データの保存先を確認してください。",
+    "research_start_failed": "研究取得を開始・保存できません。Excelと保存先を確認してください。",
+}
+
+
+def failure_reason(exc):
+    if isinstance(exc, ValueError) and str(exc) in FAILURE_MESSAGES:
+        return str(exc)
+    if isinstance(exc, sqlite3.Error):
+        return "research_storage_error"
+    return "research_start_failed"
 
 
 def capture(book, symbols, rows):
@@ -293,6 +314,7 @@ def run(
             try:
                 initialize(db)
                 count = 0
+                result = {}
                 while not (reason := stopped()):
                     begin = clock()
                     data = reader(book, symbols, 420 if one_pass or count % 15 == 0 else 12)
@@ -311,14 +333,16 @@ def run(
                             break
                         sleep(0.5)
                 status(
+                    **{k: v for k, v in result.items() if k not in {"state", "reason"}},
                     state="needs_review" if reason == "incomplete_panel" else "stopped",
                     reason=reason,
+                    last_read_reason=result.get("reason"),
                     frames=count,
                 )
             finally:
                 db.close()
-        except Exception:
-            status(state="failed", reason="check_research_configuration_or_storage")
+        except Exception as exc:
+            status(state="failed", reason=failure_reason(exc))
             raise
 
 

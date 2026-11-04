@@ -38,7 +38,12 @@ framesとquotesには読み取れなかった状態も残り、研究ボタン�
 ブックは現在のPCに作成済み。別環境では、配列sampleにcodeを持つ30銘柄とcontrolに比較銘柄を指定した
 固定リストを用意する。Node.jsの`@oai/artifact-tool`と`jszip`がある開発環境で
 `node scripts/build_research_panel.mjs <固定リスト.json> data/rss-panel`を実行する。
-稼働中のブックは差し替えない。Excelに読み込ませる前にpanel.jsonとブックのSHA-256を照合する。
+稼働中のブックは差し替えない。Excelに読み込ませる前に、panel.jsonの31銘柄と
+ブックのシート順・銘柄配置・見出し・取得用数式347個を照合する。余分な数式も拒否する。
+Excelでの通常保存による計算結果・書式・内部情報の更新は許容する。
+生成時のworkbook_sha256は来歴情報として残すが、保存後の起動可否には使わない。
+読み取り時にも既存のPowerShell検査で銘柄・数式・見出しを確認する。
+状態欄には具体的な設定・ブック・保存先のエラー理由、または前回の一括取得結果を表示する。
 [RssChartの公式仕様](https://marketspeed.jp/ms2_rss/onlinehelp/ohm_002/ohm_002_04.html)
 
 ## 両社のデータを同じ分析で使う

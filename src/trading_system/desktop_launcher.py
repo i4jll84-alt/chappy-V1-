@@ -114,6 +114,37 @@ def rakuten_progress(project, requested_ns):
     return None
 
 
+def research_result(project, requested_ns=0):
+    """A terminal result is a past capture, never evidence that a collector is active."""
+    from trading_system.research_panel import FAILURE_MESSAGES
+
+    try:
+        data = json.loads((collector_root(project, "panel") / "status.json").read_bytes())
+        at = datetime.fromisoformat(data["updated_at"])
+        if at.tzinfo is None or at.timestamp() < requested_ns / 1e9:
+            return None
+        reason = data.get("reason")
+        if data["state"] == "failed":
+            detail = "異常終了：" + FAILURE_MESSAGES.get(
+                reason, "Excelと保存先を確認してください。"
+            )
+        elif data["state"] == "stopped" and reason == "one_pass_complete":
+            detail = f"一括取得・保存完了（分足 {data.get('chart_symbols', 0)}/31銘柄）"
+        elif data["state"] == "needs_review":
+            detail = (
+                f"取得が未完了（分足 {data.get('chart_symbols', 0)}/31銘柄）。"
+                "研究用Excel・RSSの接続と応答を確認してください。"
+            )
+        elif data["state"] == "stopped":
+            detail = "停止・保存完了"
+        else:
+            return None
+        stamp = at.astimezone(ZoneInfo("Asia/Tokyo"))
+        return f"前回 {stamp:%m/%d %H:%M}：{detail}"
+    except (OSError, ValueError, KeyError, TypeError, OverflowError):
+        return None
+
+
 def collector_active(project, broker):
     name = "collector.lock" if broker == "rakuten" else "writer.lock"
     return lock_active(collector_root(project, broker) / name)
@@ -701,6 +732,12 @@ class Launcher:
                         text = "異常終了。取得画面と保存記録を確認してください。"
                 else:
                     text = "停止中。保存済みの過去の状態は現在の稼働を示しません。"
+                if broker == "panel" and not active:
+                    detail = research_result(
+                        self.project, self.panel_requested_ns if child is not None else 0
+                    )
+                    if detail:
+                        text = detail
             except OSError:
                 text = "状態を確認できません。取得画面を確認してください。"
             self.status[broker].set(NAMES[broker] + "：" + text)

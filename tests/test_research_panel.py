@@ -171,3 +171,26 @@ def test_evening_snapshot_opens_once_and_keeps_empty_minutes_and_indexes(tmp_pat
             "observed",
         )
     assert json.loads((tmp_path / "status.json").read_bytes())["reason"] == "one_pass_complete"
+
+
+def test_start_failure_records_specific_reason_without_opening_excel(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        p, "configuration", Mock(side_effect=ValueError("research_workbook_formulas_changed"))
+    )
+    opener = Mock()
+    with pytest.raises(ValueError, match="research_workbook_formulas_changed"):
+        p.run(tmp_path, int(T.timestamp() * 1e9), "none", clock=lambda: T, opener=opener)
+    opener.assert_not_called()
+    assert (
+        json.loads((tmp_path / "status.json").read_bytes())["reason"]
+        == "research_workbook_formulas_changed"
+    )
+
+
+def test_unknown_exception_text_is_not_written_to_status(tmp_path, monkeypatch):
+    monkeypatch.setattr(p, "configuration", Mock(side_effect=ValueError("private-detail")))
+    with pytest.raises(ValueError):
+        p.run(tmp_path, int(T.timestamp() * 1e9), "none", clock=lambda: T)
+    status = (tmp_path / "status.json").read_text()
+    assert "private-detail" not in status
+    assert json.loads(status)["reason"] == "research_start_failed"

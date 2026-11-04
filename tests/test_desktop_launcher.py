@@ -12,6 +12,26 @@ from trading_system.brokers.locking import single_writer
 from trading_system.data_sources.rss_snapshot import inspect_cache
 
 
+def test_research_result_is_specific_fresh_and_never_claims_running(tmp_path):
+    root = launcher.collector_root(tmp_path, "panel")
+    root.mkdir(parents=True)
+    at = datetime(2026, 11, 4, 11, 9, tzinfo=UTC)
+    status = {
+        "updated_at": at.isoformat(),
+        "state": "failed",
+        "reason": "research_workbook_formulas_changed",
+    }
+    (root / "status.json").write_text(json.dumps(status))
+    assert "取得用数式" in launcher.research_result(tmp_path)
+    assert launcher.research_result(tmp_path, int(at.timestamp() + 1) * 10**9) is None
+    status.update(state="stopped", reason="one_pass_complete", chart_symbols=31)
+    (root / "status.json").write_text(json.dumps(status))
+    assert "保存完了（分足 31/31銘柄）" in launcher.research_result(tmp_path)
+    status.update(state="read")
+    (root / "status.json").write_text(json.dumps(status))
+    assert launcher.research_result(tmp_path) is None
+
+
 def settings():
     return {
         "brokers": ["rakuten"],
