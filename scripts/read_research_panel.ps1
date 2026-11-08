@@ -11,6 +11,15 @@ function Test-Formula($actual,$expectedText) {
     if ($actual -isnot [string]) {return $false}
     return (($actual -creplace '^=@?(?:_xll\.)?','=') -ceq $expectedText)
 }
+function Get-ChartLastRow($dateColumn) {
+    # RssChart starts in row 3 and may leave older cells below its first end marker.
+    $lastDataRow = 2
+    foreach ($dateValue in $dateColumn) {
+        if ('--------' -ceq $dateValue) { break }
+        $lastDataRow++
+    }
+    return $lastDataRow
+}
 try {
     if($expected.Count -ne 31 -or @($expected|Where-Object {$_ -cnotmatch '^[0-9][A-Z0-9]{3}\.T$'}).Count){throw 'panel'}
     $app=[Runtime.InteropServices.Marshal]::GetActiveObject('Excel.Application')
@@ -42,11 +51,17 @@ try {
         if(-not (Test-Formula $ws.Range('A1').Formula2 $wanted)){throw 'chart'}
         $header=$ws.Range('A2:G2').Value2
         for($j=0;$j -lt 7;$j++){if($header.GetValue(1,$j+1) -cne $headers[$j]){throw 'chart_header'}}
-        $last=$ws.Cells.Item($ws.Rows.Count,1).End(-4162).Row
+        $bottom=$ws.Cells.Item($ws.Rows.Count,1).End(-4162).Row
+        $last=2
+        if($bottom -ge 3){
+            $last=Get-ChartLastRow ($ws.Range("A3:A${bottom}").Value2)
+        }
         $bars=@()
         if($last -ge 3){
             $first=[Math]::Max(3,$last-$Rows+1)
             $matrix=$ws.Range("A${first}:G${last}").Value2
+            # If the live output shrank during the read, discard this mixed snapshot.
+            if((Get-ChartLastRow ($ws.Range("A3:A${last}").Value2)) -lt $last){throw 'chart'}
             $bars=@(for($n=1;$n -le $matrix.GetLength(0);$n++){
                 $bar=@(for($j=1;$j -le 7;$j++){,($matrix.GetValue($n,$j))})
                 ,$bar
