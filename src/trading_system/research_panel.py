@@ -90,13 +90,19 @@ def capture(book, symbols, rows):
             timeout=45,
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
-        if not p.returncode:
-            data = json.loads(p.stdout.decode("utf-8-sig"))
-            if isinstance(data, dict) and data.get("state") in {"read", "unavailable"}:
-                return data
-    except (OSError, ValueError, subprocess.TimeoutExpired):
-        pass
-    return {"state": "unavailable", "reason": "reader_failed_or_timed_out"}
+    except subprocess.TimeoutExpired:
+        return {"state": "unavailable", "reason": "reader_timeout", "stage": "process"}
+    except OSError:
+        return {"state": "unavailable", "reason": "reader_launch_failed", "stage": "process"}
+    if p.returncode:
+        return {"state": "unavailable", "reason": "reader_exit_failed", "stage": "process"}
+    try:
+        data = json.loads(p.stdout.decode("utf-8-sig"))
+    except ValueError:
+        data = None
+    if isinstance(data, dict) and data.get("state") in {"read", "unavailable"}:
+        return data
+    return {"state": "unavailable", "reason": "reader_invalid_output", "stage": "process"}
 
 
 def excel_date(value):
@@ -314,11 +320,18 @@ def run(
             try:
                 initialize(db)
                 count = 0
+                next_full = 0
+                fast_retry_used = False
                 result = {}
                 while not (reason := stopped()):
                     begin = clock()
-                    data = reader(book, symbols, 420 if one_pass or count % 15 == 0 else 12)
+                    rows = 420 if one_pass or count >= next_full else 12
+                    data = {**reader(book, symbols, rows), "requested_rows": rows}
                     result = save(db, symbols, data, begin, clock())
+                    success = result["state"] == "read"
+                    if rows == 420:
+                        # Keep one short poll between failed full reads so live quotes can progress.
+                        next_full = count + (15 if success else 2)
                     count += 1
                     status(**result, frames=count)
                     if one_pass and (result["chart_symbols"] == len(symbols) or count >= 4):
@@ -328,7 +341,24 @@ def run(
                             else "incomplete_panel"
                         )
                         break
-                    for _ in range(30):
+                    if success:
+                        fast_retry_used = False
+                    wait_seconds = 15
+                    if (
+                        not fast_retry_used
+                        and result["reason"]
+                        in {
+                            "busy",
+                            "excel_call_rejected",
+                            "excel_retry_later",
+                            "excel_unavailable",
+                            "chart_range_changed",
+                        }
+                        and result["state"] == "unavailable"
+                    ):
+                        wait_seconds = 3
+                        fast_retry_used = True
+                    for _ in range(2 * wait_seconds):
                         if stopped():
                             break
                         sleep(0.5)

@@ -194,3 +194,92 @@ def test_unknown_exception_text_is_not_written_to_status(tmp_path, monkeypatch):
     status = (tmp_path / "status.json").read_text()
     assert "private-detail" not in status
     assert json.loads(status)["reason"] == "research_start_failed"
+
+
+def test_full_read_recovery_and_bounded_retry_keep_all_observations(tmp_path, monkeypatch):
+    monkeypatch.setattr(p, "configuration", lambda _: (CODES, tmp_path / "panel.xlsx"))
+    now = T
+    calls = []
+    outcomes = {0: "busy", 1: "excel_call_rejected", 2: "excel_retry_later", 5: "busy"}
+
+    def read(_book, _symbols, rows):
+        attempt = len(calls)
+        calls.append((now, rows))
+        if attempt == 19:
+            publish_stop(tmp_path)
+        if attempt in outcomes:
+            return {"state": "unavailable", "reason": outcomes[attempt], "stage": "ready"}
+        return sample()
+
+    def advance(seconds):
+        nonlocal now
+        now += timedelta(seconds=seconds)
+
+    p.run(
+        tmp_path,
+        int(T.timestamp() * 1e9),
+        "none",
+        clock=lambda: now,
+        sleep=advance,
+        opener=lambda _: None,
+        reader=read,
+    )
+    assert [i for i, (_, rows) in enumerate(calls) if rows == 420] == [0, 2, 4, 19]
+    gaps = [(b[0] - a[0]).total_seconds() for a, b in zip(calls, calls[1:])]
+    assert gaps[:7] == [3, 15, 15, 15, 15, 3, 15]
+    with sqlite3.connect(tmp_path / "research.sqlite") as db:
+        raw = [
+            json.loads(gzip.decompress(b))
+            for (b,) in db.execute("SELECT raw_gzip FROM frames ORDER BY id")
+        ]
+    assert [r["requested_rows"] for r in raw] == [width for _, width in calls]
+    assert {i: r["reason"] for i, r in enumerate(raw) if r["state"] == "unavailable"} == outcomes
+
+
+@pytest.mark.parametrize("stop_method", ["marker", "deadline"])
+def test_fast_retry_remains_interruptible(tmp_path, monkeypatch, stop_method):
+    monkeypatch.setattr(p, "configuration", lambda _: (CODES, tmp_path / "panel.xlsx"))
+    now = T
+    reader = Mock(return_value={"state": "unavailable", "reason": "busy"})
+
+    def interrupt(seconds):
+        nonlocal now
+        assert seconds == 0.5
+        if stop_method == "marker":
+            publish_stop(tmp_path)
+        else:
+            now = now.replace(hour=16)
+
+    p.run(
+        tmp_path,
+        int(T.timestamp() * 1e9),
+        "none",
+        clock=lambda: now,
+        sleep=interrupt,
+        opener=lambda _: None,
+        reader=reader,
+    )
+    reader.assert_called_once()
+    status = json.loads((tmp_path / "status.json").read_bytes())
+    assert status["reason"] == ("manual_stop" if stop_method == "marker" else "daytime_1600")
+
+
+@pytest.mark.parametrize(
+    "reply, reason",
+    [
+        (p.subprocess.TimeoutExpired("fixture", 45), "reader_timeout"),
+        (OSError("sensitive"), "reader_launch_failed"),
+        (p.subprocess.CompletedProcess([], 1, b"sensitive"), "reader_exit_failed"),
+        (p.subprocess.CompletedProcess([], 0, b"bad-json"), "reader_invalid_output"),
+    ],
+)
+def test_capture_process_failure_reasons(monkeypatch, tmp_path, reply, reason):
+    monkeypatch.setenv("SystemRoot", str(tmp_path))
+    monkeypatch.setattr(p.subprocess, "CREATE_NO_WINDOW", 0, raising=False)
+    runner = Mock(side_effect=reply) if isinstance(reply, Exception) else Mock(return_value=reply)
+    monkeypatch.setattr(p.subprocess, "run", runner)
+    assert p.capture(tmp_path / "book.xlsx", CODES, 12) == {
+        "state": "unavailable",
+        "reason": reason,
+        "stage": "process",
+    }

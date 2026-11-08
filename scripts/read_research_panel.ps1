@@ -20,16 +20,46 @@ function Get-ChartLastRow($dateColumn) {
     }
     return $lastDataRow
 }
+function Get-ReadFailure($exception, $stage, $affectedSymbol) {
+    $reason = 'excel_unavailable'
+    $code = $null
+    for ($cause = $exception; $null -ne $cause; $cause = $cause.InnerException) {
+        if ($cause -is [Runtime.InteropServices.COMException]) {
+            $code = '0x{0:X8}' -f $cause.HResult
+        }
+    }
+    if ($exception.Message -in @('panel','busy','workbook_not_found','sheet_count',
+            'symbol','header','formula','chart','chart_header','chart_range_changed')) {
+        $reason = $exception.Message
+    } elseif ($code -in @('0x80010001','0x8001010B')) {
+        $reason = 'excel_call_rejected'
+    } elseif ($code -eq '0x8001010A') {
+        $reason = 'excel_retry_later'
+    } elseif ($stage -eq 'attach' -and $code -eq '0x800401E3') {
+        $reason = 'excel_not_registered'
+    }
+    # Only controlled labels, a configured symbol and the numeric COM code leave the reader.
+    return @{state='unavailable'; reason=$reason; stage=$stage; symbol=$affectedSymbol; hresult=$code}
+}
+$stage='panel'
+$affectedSymbol=$null
 try {
     if($expected.Count -ne 31 -or @($expected|Where-Object {$_ -cnotmatch '^[0-9][A-Z0-9]{3}\.T$'}).Count){throw 'panel'}
+    $stage='attach'
     $app=[Runtime.InteropServices.Marshal]::GetActiveObject('Excel.Application')
+    $stage='ready'
     if(-not $app.Ready){throw 'busy'}
+    $stage='find_workbook'
     $book=$null
     foreach($candidate in $app.Workbooks){
         if([string]::Equals($candidate.FullName,$WorkbookPath,[StringComparison]::OrdinalIgnoreCase)){$book=$candidate;break}
     }
-    if($null -eq $book -or $book.Sheets.Count -ne 32){throw 'workbook'}
-    $quotes=$book.Worksheets.Item('気配').Range('A1:K32')
+    if($null -eq $book){throw 'workbook_not_found'}
+    $stage='sheet_count'
+    if($book.Sheets.Count -ne 32){throw 'sheet_count'}
+    $stage='quotes'
+    $worksheets=$book.Worksheets
+    $quotes=$worksheets.Item('気配').Range('A1:K32')
     $formulas=$quotes.Formula2
     $vals=$quotes.Value2
     $after=$quotes.Formula2
@@ -37,6 +67,8 @@ try {
     $result=@()
     for($i=0;$i -lt $expected.Count;$i++){
         $symbol=$expected[$i]
+        $affectedSymbol=$symbol
+        $stage='quote_identity'
         $row=$i+2
         if($vals.GetValue($row,1) -cne $symbol){throw 'symbol'}
         $q=@()
@@ -46,11 +78,15 @@ try {
                -not (Test-Formula ($after.GetValue($row,$j+2)) $wanted)){throw 'formula'}
             $q+=,($vals.GetValue($row,$j+2))
         }
-        $ws=$book.Worksheets.Item($symbol)
+        $stage='chart_formula_before'
+        $ws=$worksheets.Item($symbol)
+        $anchor=$ws.Range('A1')
         $wanted='=RssChart(A2:G2,"'+$symbol+'","1M",400)'
-        if(-not (Test-Formula $ws.Range('A1').Formula2 $wanted)){throw 'chart'}
+        if(-not (Test-Formula $anchor.Formula2 $wanted)){throw 'chart'}
+        $stage='chart_header'
         $header=$ws.Range('A2:G2').Value2
         for($j=0;$j -lt 7;$j++){if($header.GetValue(1,$j+1) -cne $headers[$j]){throw 'chart_header'}}
+        $stage='chart_boundary'
         $bottom=$ws.Cells.Item($ws.Rows.Count,1).End(-4162).Row
         $last=2
         if($bottom -ge 3){
@@ -59,19 +95,24 @@ try {
         $bars=@()
         if($last -ge 3){
             $first=[Math]::Max(3,$last-$Rows+1)
+            $stage='chart_values'
             $matrix=$ws.Range("A${first}:G${last}").Value2
             # If the live output shrank during the read, discard this mixed snapshot.
-            if((Get-ChartLastRow ($ws.Range("A3:A${last}").Value2)) -lt $last){throw 'chart'}
+            $stage='chart_boundary_after'
+            if((Get-ChartLastRow ($ws.Range("A3:A${last}").Value2)) -lt $last){throw 'chart_range_changed'}
             $bars=@(for($n=1;$n -le $matrix.GetLength(0);$n++){
                 $bar=@(for($j=1;$j -le 7;$j++){,($matrix.GetValue($n,$j))})
                 ,$bar
             })
         }
-        if(-not (Test-Formula $ws.Range('A1').Formula2 $wanted)){throw 'chart'}
+        $stage='chart_formula_after'
+        if(-not (Test-Formula $anchor.Formula2 $wanted)){throw 'chart'}
         $result+=@{symbol=$symbol;quote=$q;bars=$bars}
     }
+    $stage='indexes'
+    $affectedSymbol=$null
     $indexes=@()
-    $ix=$book.Worksheets.Item('気配').Range('A36:D37')
+    $ix=$worksheets.Item('気配').Range('A36:D37')
     $ifm=$ix.Formula2;$iv=$ix.Value2;$ia=$ix.Formula2
     $ixCodes=@('N225','TOPX');$ixFields=@('現在日付','更新時刻','現在値')
     for($i=0;$i -lt 2;$i++){
@@ -86,8 +127,6 @@ try {
     }
     $data=@{state='read';items=$result;indexes=$indexes}
 } catch {
-    # Never emit Excel exception text, other workbook names or credentials.
-    $reason=if($_.Exception.Message -in @('panel','busy','workbook','symbol','header','formula','chart','chart_header')){$_.Exception.Message}else{'excel_unavailable'}
-    $data=@{state='unavailable';reason=$reason}
+    $data=Get-ReadFailure $_.Exception $stage $affectedSymbol
 }
 ConvertTo-Json -InputObject $data -Depth 7 -Compress
