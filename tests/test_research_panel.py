@@ -200,7 +200,14 @@ def test_full_read_recovery_and_bounded_retry_keep_all_observations(tmp_path, mo
     monkeypatch.setattr(p, "configuration", lambda _: (CODES, tmp_path / "panel.xlsx"))
     now = T
     calls = []
-    outcomes = {0: "busy", 1: "excel_call_rejected", 2: "excel_retry_later", 5: "busy"}
+    outcomes = {
+        0: "busy",
+        1: "excel_call_rejected",
+        2: "excel_retry_later",
+        5: "busy",
+        7: "excel_property_unavailable",
+        9: "excel_range_shape",
+    }
 
     def read(_book, _symbols, rows):
         attempt = len(calls)
@@ -226,7 +233,7 @@ def test_full_read_recovery_and_bounded_retry_keep_all_observations(tmp_path, mo
     )
     assert [i for i, (_, rows) in enumerate(calls) if rows == 420] == [0, 2, 4, 19]
     gaps = [(b[0] - a[0]).total_seconds() for a, b in zip(calls, calls[1:])]
-    assert gaps[:7] == [3, 15, 15, 15, 15, 3, 15]
+    assert gaps[:11] == [3, 15, 15, 15, 15, 3, 15, 3, 15, 3, 15]
     with sqlite3.connect(tmp_path / "research.sqlite") as db:
         raw = [
             json.loads(gzip.decompress(b))

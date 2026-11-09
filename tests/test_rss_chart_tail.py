@@ -6,29 +6,86 @@ import pytest
 
 
 @pytest.mark.skipif(os.name != "nt", reason="The RSS reader runs under Windows PowerShell.")
-def test_chart_end_marker_limits_the_live_range():
+def test_excel_property_reads_and_chart_snapshot():
     reader = Path(__file__).resolve().parents[1] / "scripts/read_research_panel.ps1"
-    # An invalid symbol list returns before touching Excel and leaves the real functions in scope.
-    scenario = """
+    # Invalid panel returns before attaching to Excel and exposes the production functions.
+    scenario = r"""
 $ErrorActionPreference = 'Stop'
 . $env:RSS_TEST_READER -WorkbookPath unused -Symbols fixture | Out-Null
-$column = [Array]::CreateInstance([object], [int[]]@(5, 1), [int[]]@(1, 1))
-$values = @('2026/11/06', '2026/11/06', '--------', '2026/11/05', '--------')
-for ($i = 0; $i -lt $values.Count; $i++) { $column.SetValue($values[$i], $i + 1, 1) }
-if ((Get-ChartLastRow $column) -ne 4) { throw 'stale tail' }
-if ((Get-ChartLastRow @('--------', '2026/11/05')) -ne 2) { throw 'no active rows' }
-if ((Get-ChartLastRow '2026/11/06') -ne 3) { throw 'one cell' }
-if ((Get-ChartLastRow @(46332, 46333)) -ne 4) { throw 'no end marker' }
-$transient = [Runtime.InteropServices.COMException]::new('sensitive', [int]0x8001010A)
-$wrapped = [Exception]::new('private', $transient)
-$issue = Get-ReadFailure $wrapped 'chart_values' '7203.T'
-if ($issue.reason -ne 'excel_retry_later' -or $issue.hresult -ne '0x8001010A' -or
-    $issue.stage -ne 'chart_values' -or $issue.symbol -ne '7203.T') { throw 'COM details' }
-if (($issue | ConvertTo-Json) -match 'private|sensitive') { throw 'exception message leaked' }
-$generic = Get-ReadFailure ([Exception]::new('private')) 'quotes' $null
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class RangeFixture {
+    public int Failures, Calls, Code = unchecked((int)0x80010001);
+    public object Data;
+    public object Formula2 {
+        get {
+            Calls++;
+            if (Failures-- > 0) throw new COMException("sensitive", Code);
+            return Data;
+        }
+    }
+}
+"@
+function Assert-Failure($action, $reason) {
+    try { & $action | Out-Null } catch {
+        $issue = Get-ReadFailure $_.Exception $stage $affectedSymbol
+        if ($issue.reason -ne $reason) {throw "unexpected reason $($issue.reason)"}
+        if (($issue | ConvertTo-Json) -match 'sensitive') {throw 'exception leaked'}
+        return
+    }
+    throw "expected failure $reason"
+}
+$stage='quote_formulas_before'
+$affectedSymbol=$null
+$range=[RangeFixture]::new()
+$range.Failures=1
+# Ordinary PowerShell property access loses the COM exception, as in the old reader.
+if ($null -ne $range.Formula2 -or $range.Calls -ne 1) {throw 'silent getter repro'}
+$range.Failures=1
+$range.Data=[Array]::CreateInstance([object], [int[]]@(32,11), [int[]]@(1,1))
+$result=Read-Matrix $range 'Formula2' 32 11
+if ($result.Rank -ne 2 -or $result.GetLength(0) -ne 32 -or $range.Calls -ne 3 -or
+    $retryLog.Count -ne 1 -or $retryLog[0].hresult -ne '0x80010001' -or
+    $retryLog[0].stage -ne $stage -or $retryLog[0].property -ne 'Formula2') {throw 'retry evidence'}
+$range.Code=[int]0x8001010A
+$range.Failures=9
+Assert-Failure {Read-Matrix $range 'Formula2' 32 11} 'excel_retry_later'
+if ($range.Calls -ne 5 -or $retryLog.Count -ne 2) {throw 'per-frame retry limit'}
+$retryLog.Clear()
+$range.Code=[int]0x800A03EC
+Assert-Failure {Read-Matrix $range 'Formula2' 32 11} 'excel_unavailable'
+if ($range.Calls -ne 6 -or $retryLog.Count) {throw 'permanent failure retried'}
+$range.Failures=0
+$range.Data=$null
+Assert-Failure {Read-Matrix $range 'Formula2' 32 11} 'excel_property_unavailable'
+foreach($bad in @('scalar', (,[int[]]@(1,2)))) {
+    $range.Data=$bad
+    Assert-Failure {Read-Matrix $range 'Formula2' 32 11} 'excel_range_shape'
+}
+$range.Data=[Array]::CreateInstance([object], [int[]]@(31,11), [int[]]@(1,1))
+Assert-Failure {Read-Matrix $range 'Formula2' 32 11} 'excel_range_shape'
+$generic=Get-ReadFailure ([Exception]::new('private')) 'quotes' $null
 if ($generic.reason -ne 'excel_unavailable' -or $null -ne $generic.hresult) {throw 'generic'}
-$guard = Get-ReadFailure ([Exception]::new('chart')) 'chart_formula_after' '7203.T'
-if ($guard.reason -ne 'chart' -or $guard.state -ne 'unavailable') {throw 'guard'}
+
+# Header, date column and OHLCV belong to the same 1-based Excel Value2 response.
+$matrix=[Array]::CreateInstance([object], [int[]]@(6,7), [int[]]@(1,1))
+for($col=1;$col -le 7;$col++){ $matrix.SetValue($headers[$col-1],1,$col) }
+foreach($row in 2,3,5){$matrix.SetValue('2026/11/09',$row,1);$matrix.SetValue($row,$row,7)}
+$matrix.SetValue('--------',4,1)
+$bars=@(Get-ChartBars $matrix 12 $true)
+if ($bars.Count -ne 2 -or $bars[0].Length -ne 7 -or $bars[1][6] -ne 3) {throw 'stale tail'}
+if (@(Get-ChartBars $matrix 1 $true)[0][6] -ne 3) {throw 'latest row'}
+$matrix.SetValue('--------',2,1)
+if (@(Get-ChartBars $matrix 420 $true).Count -ne 0) {throw 'empty chart'}
+$matrix.SetValue(46335,2,1)
+$matrix.SetValue($null,4,1)
+if (@(Get-ChartBars $matrix 420 $true).Count -ne 4) {throw 'no marker, trailing blank'}
+$matrix.SetValue('2026/11/09',6,1)
+Assert-Failure {Get-ChartBars $matrix 12 $true} 'chart_range_changed'
+$matrix.SetValue('changed',1,2)
+Assert-Failure {Get-ChartBars $matrix 12 $false} 'chart_header'
+if (Test-Formula '=wrong' '=expected') {throw 'invalid formula accepted'}
 """
     subprocess.run(
         [

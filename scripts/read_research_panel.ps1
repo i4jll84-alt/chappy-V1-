@@ -11,15 +11,6 @@ function Test-Formula($actual,$expectedText) {
     if ($actual -isnot [string]) {return $false}
     return (($actual -creplace '^=@?(?:_xll\.)?','=') -ceq $expectedText)
 }
-function Get-ChartLastRow($dateColumn) {
-    # RssChart starts in row 3 and may leave older cells below its first end marker.
-    $lastDataRow = 2
-    foreach ($dateValue in $dateColumn) {
-        if ('--------' -ceq $dateValue) { break }
-        $lastDataRow++
-    }
-    return $lastDataRow
-}
 function Get-ReadFailure($exception, $stage, $affectedSymbol) {
     $reason = 'excel_unavailable'
     $code = $null
@@ -29,7 +20,8 @@ function Get-ReadFailure($exception, $stage, $affectedSymbol) {
         }
     }
     if ($exception.Message -in @('panel','busy','workbook_not_found','sheet_count',
-            'symbol','header','formula','chart','chart_header','chart_range_changed')) {
+            'symbol','header','formula','chart','chart_header','chart_range_changed',
+            'excel_property_unavailable','excel_range_shape')) {
         $reason = $exception.Message
     } elseif ($code -in @('0x80010001','0x8001010B')) {
         $reason = 'excel_call_rejected'
@@ -38,31 +30,106 @@ function Get-ReadFailure($exception, $stage, $affectedSymbol) {
     } elseif ($stage -eq 'attach' -and $code -eq '0x800401E3') {
         $reason = 'excel_not_registered'
     }
-    # Only controlled labels, a configured symbol and the numeric COM code leave the reader.
     return @{state='unavailable'; reason=$reason; stage=$stage; symbol=$affectedSymbol; hresult=$code}
+}
+# Cached dynamic COM call sites propagate HRESULTs. Reflection on every cell-range
+# property is slow enough to delay the next market observation.
+Add-Type -ReferencedAssemblies Microsoft.CSharp,System.Core -TypeDefinition @"
+public static class RakutenExcelRead {
+    public static object Property(dynamic target, string name) {
+        switch (name) {
+            case "Ready": return target.Ready;
+            case "Workbooks": return target.Workbooks;
+            case "Count": return target.Count;
+            case "FullName": return target.FullName;
+            case "Sheets": return target.Sheets;
+            case "Worksheets": return target.Worksheets;
+            case "Row": return target.Row;
+            case "Formula2": return target.Formula2;
+            case "Value2": return target.Value2;
+            default: throw new System.ArgumentException("unknown Excel property");
+        }
+    }
+}
+"@
+function Get-ExcelProperty($target, [string]$name, [object[]]$arguments) {
+    if ($null -eq $target) {throw 'excel_property_unavailable'}
+    while ($true) {
+        try {
+            # PowerShell's ordinary property getter can turn a COM exception into $null.
+            if ($arguments) {
+                $value = $target.$name($arguments[0])
+            } else {
+                $value = [RakutenExcelRead]::Property($target,$name)
+            }
+            if ($null -eq $value) {throw 'excel_property_unavailable'}
+            return ,$value
+        } catch {
+            $issue = Get-ReadFailure $_.Exception $stage $affectedSymbol
+            if ($issue.reason -notin @('excel_call_rejected','excel_retry_later') -or
+                $retryLog.Count -ge 2) {throw}
+            $retryLog.Add(@{stage=$stage; property=$name; symbol=$affectedSymbol; hresult=$issue.hresult})
+            Start-Sleep -Milliseconds (200 * $retryLog.Count)
+        }
+    }
+}
+function Read-Matrix($range, $property, $height, $width) {
+    $matrix = Get-ExcelProperty $range $property
+    if ($matrix -isnot [Array] -or $matrix.Rank -ne 2 -or
+        $matrix.GetLowerBound(0) -ne 1 -or $matrix.GetLowerBound(1) -ne 1 -or
+        $matrix.GetLength(0) -ne $height -or $matrix.GetLength(1) -ne $width) {
+        throw 'excel_range_shape'
+    }
+    return ,$matrix
+}
+function Get-ChartBars($matrix, $limit, $hasGuardRow) {
+    for ($col=1; $col -le 7; $col++) {
+        if ($matrix.GetValue(1,$col) -cne $headers[$col-1]) {throw 'chart_header'}
+    }
+    $last = 1
+    for ($row=2; $row -le $matrix.GetLength(0); $row++) {
+        $day = $matrix.GetValue($row,1)
+        if ('--------' -ceq $day) {break}
+        if ($null -ne $day -and '' -cne [string]$day) {$last=$row}
+    }
+    if ($hasGuardRow -and $last -eq $matrix.GetLength(0)) {throw 'chart_range_changed'}
+    for ($row=[Math]::Max(2,$last-$limit+1); $row -le $last; $row++) {
+        $bar = @(for ($col=1; $col -le 7; $col++) {,($matrix.GetValue($row,$col))})
+        ,$bar
+    }
 }
 $stage='panel'
 $affectedSymbol=$null
+$retryLog=[Collections.Generic.List[object]]::new()
 try {
     if($expected.Count -ne 31 -or @($expected|Where-Object {$_ -cnotmatch '^[0-9][A-Z0-9]{3}\.T$'}).Count){throw 'panel'}
     $stage='attach'
     $app=[Runtime.InteropServices.Marshal]::GetActiveObject('Excel.Application')
     $stage='ready'
-    if(-not $app.Ready){throw 'busy'}
+    if(-not (Get-ExcelProperty $app 'Ready')){throw 'busy'}
     $stage='find_workbook'
+    $books=Get-ExcelProperty $app 'Workbooks'
+    $count=Get-ExcelProperty $books 'Count'
     $book=$null
-    foreach($candidate in $app.Workbooks){
-        if([string]::Equals($candidate.FullName,$WorkbookPath,[StringComparison]::OrdinalIgnoreCase)){$book=$candidate;break}
+    for($i=1;$i -le $count;$i++){
+        $candidate=Get-ExcelProperty $books 'Item' @($i)
+        if([string]::Equals((Get-ExcelProperty $candidate 'FullName'),$WorkbookPath,[StringComparison]::OrdinalIgnoreCase)){$book=$candidate;break}
     }
     if($null -eq $book){throw 'workbook_not_found'}
     $stage='sheet_count'
-    if($book.Sheets.Count -ne 32){throw 'sheet_count'}
+    $sheets=Get-ExcelProperty $book 'Sheets'
+    if((Get-ExcelProperty $sheets 'Count') -ne 32){throw 'sheet_count'}
+    $worksheets=Get-ExcelProperty $book 'Worksheets'
     $stage='quotes'
-    $worksheets=$book.Worksheets
-    $quotes=$worksheets.Item('気配').Range('A1:K32')
-    $formulas=$quotes.Formula2
-    $vals=$quotes.Value2
-    $after=$quotes.Formula2
+    $quoteSheet=Get-ExcelProperty $worksheets 'Item' @('気配')
+    $quotes=Get-ExcelProperty $quoteSheet 'Range' @('A1:K32')
+    $stage='quote_formulas_before'
+    $formulas=Read-Matrix $quotes 'Formula2' 32 11
+    $stage='quote_values'
+    $vals=Read-Matrix $quotes 'Value2' 32 11
+    $stage='quote_formulas_after'
+    $after=Read-Matrix $quotes 'Formula2' 32 11
+    $stage='quote_identity'
     for($k=0;$k -lt $fields.Count;$k++){if($vals.GetValue(1,$k+2) -cne $fields[$k]){throw 'header'}}
     $result=@()
     for($i=0;$i -lt $expected.Count;$i++){
@@ -79,41 +146,32 @@ try {
             $q+=,($vals.GetValue($row,$j+2))
         }
         $stage='chart_formula_before'
-        $ws=$worksheets.Item($symbol)
-        $anchor=$ws.Range('A1')
+        $ws=Get-ExcelProperty $worksheets 'Item' @($symbol)
+        $anchor=Get-ExcelProperty $ws 'Range' @('A1')
         $wanted='=RssChart(A2:G2,"'+$symbol+'","1M",400)'
-        if(-not (Test-Formula $anchor.Formula2 $wanted)){throw 'chart'}
-        $stage='chart_header'
-        $header=$ws.Range('A2:G2').Value2
-        for($j=0;$j -lt 7;$j++){if($header.GetValue(1,$j+1) -cne $headers[$j]){throw 'chart_header'}}
+        if(-not (Test-Formula (Get-ExcelProperty $anchor 'Formula2') $wanted)){throw 'chart'}
         $stage='chart_boundary'
-        $bottom=$ws.Cells.Item($ws.Rows.Count,1).End(-4162).Row
-        $last=2
-        if($bottom -ge 3){
-            $last=Get-ChartLastRow ($ws.Range("A3:A${bottom}").Value2)
-        }
-        $bars=@()
-        if($last -ge 3){
-            $first=[Math]::Max(3,$last-$Rows+1)
-            $stage='chart_values'
-            $matrix=$ws.Range("A${first}:G${last}").Value2
-            # If the live output shrank during the read, discard this mixed snapshot.
-            $stage='chart_boundary_after'
-            if((Get-ChartLastRow ($ws.Range("A3:A${last}").Value2)) -lt $last){throw 'chart_range_changed'}
-            $bars=@(for($n=1;$n -le $matrix.GetLength(0);$n++){
-                $bar=@(for($j=1;$j -le 7;$j++){,($matrix.GetValue($n,$j))})
-                ,$bar
-            })
-        }
+        $sheetEnd=Get-ExcelProperty $ws 'Range' @('A1048576')
+        $usedEnd=Get-ExcelProperty $sheetEnd 'End' @(-4162)
+        $bottom=Get-ExcelProperty $usedEnd 'Row'
+        # Include a guard row to detect growth after End(xlUp). Header, end marker and
+        # OHLCV all come from one Value2 call, including when the live range shrinks.
+        $endRow=[Math]::Min(1048576,[Math]::Max(2,$bottom)+1)
+        $stage='chart_snapshot'
+        $range=Get-ExcelProperty $ws 'Range' @("A2:G${endRow}")
+        $matrix=Read-Matrix $range 'Value2' ($endRow-1) 7
+        $bars=@(Get-ChartBars $matrix $Rows ($endRow -gt $bottom))
         $stage='chart_formula_after'
-        if(-not (Test-Formula $anchor.Formula2 $wanted)){throw 'chart'}
+        if(-not (Test-Formula (Get-ExcelProperty $anchor 'Formula2') $wanted)){throw 'chart'}
         $result+=@{symbol=$symbol;quote=$q;bars=$bars}
     }
     $stage='indexes'
     $affectedSymbol=$null
     $indexes=@()
-    $ix=$worksheets.Item('気配').Range('A36:D37')
-    $ifm=$ix.Formula2;$iv=$ix.Value2;$ia=$ix.Formula2
+    $ix=Get-ExcelProperty $quoteSheet 'Range' @('A36:D37')
+    $ifm=Read-Matrix $ix 'Formula2' 2 4
+    $iv=Read-Matrix $ix 'Value2' 2 4
+    $ia=Read-Matrix $ix 'Formula2' 2 4
     $ixCodes=@('N225','TOPX');$ixFields=@('現在日付','更新時刻','現在値')
     for($i=0;$i -lt 2;$i++){
         $key=$ixCodes[$i];$ok=$iv.GetValue($i+1,1) -ceq $key
@@ -129,4 +187,5 @@ try {
 } catch {
     $data=Get-ReadFailure $_.Exception $stage $affectedSymbol
 }
+if($retryLog.Count){$data.property_retries=$retryLog.ToArray()}
 ConvertTo-Json -InputObject $data -Depth 7 -Compress

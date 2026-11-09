@@ -352,6 +352,8 @@ def run(
                             "excel_call_rejected",
                             "excel_retry_later",
                             "excel_unavailable",
+                            "excel_property_unavailable",
+                            "excel_range_shape",
                             "chart_range_changed",
                         }
                         and result["state"] == "unavailable"
