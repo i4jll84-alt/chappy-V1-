@@ -68,22 +68,31 @@ Assert-Failure {Read-Matrix $range 'Formula2' 32 11} 'excel_range_shape'
 $generic=Get-ReadFailure ([Exception]::new('private')) 'quotes' $null
 if ($generic.reason -ne 'excel_unavailable' -or $null -ne $generic.hresult) {throw 'generic'}
 
-# Header, date column and OHLCV belong to the same 1-based Excel Value2 response.
-$matrix=[Array]::CreateInstance([object], [int[]]@(6,7), [int[]]@(1,1))
-for($col=1;$col -le 7;$col++){ $matrix.SetValue($headers[$col-1],1,$col) }
-foreach($row in 2,3,5){$matrix.SetValue('2026/11/09',$row,1);$matrix.SetValue($row,$row,7)}
-$matrix.SetValue('--------',4,1)
+# Status, header, date column and OHLCV share one Excel Value2 snapshot.
+$matrix=[Array]::CreateInstance([object], [int[]]@(7,7), [int[]]@(1,1))
+$f='=RssChart(A2:G2,"7203.T","1M",400)'
+$shown=$f.Replace('=RssChart','=@RssChart')
+$matrix.SetValue("$shown => 配信中",1,1)
+if ((Get-ChartStatus ($matrix.GetValue(1,1)) $f) -ne 'streaming') {throw 'live status'}
+$offline='マーケットスピード II にログインして「接続中」の状態に変更してから利用してください。'
+if ((Get-ChartStatus "$shown => $offline" $f) -ne 'connection_required') {throw 'offline status'}
+foreach ($unknown in @($null,'','配信中',"$shown => 配信中断",'=wrong => 配信中')) {
+    if ((Get-ChartStatus $unknown $f) -ne 'unknown') {throw 'false status'}
+}
+for($col=1;$col -le 7;$col++){ $matrix.SetValue($headers[$col-1],2,$col) }
+foreach($row in 3,4,6){$matrix.SetValue('2026/11/09',$row,1);$matrix.SetValue($row,$row,7)}
+$matrix.SetValue('--------',5,1)
 $bars=@(Get-ChartBars $matrix 12 $true)
-if ($bars.Count -ne 2 -or $bars[0].Length -ne 7 -or $bars[1][6] -ne 3) {throw 'stale tail'}
-if (@(Get-ChartBars $matrix 1 $true)[0][6] -ne 3) {throw 'latest row'}
-$matrix.SetValue('--------',2,1)
+if ($bars.Count -ne 2 -or $bars[0].Length -ne 7 -or $bars[1][6] -ne 4) {throw 'stale tail'}
+if (@(Get-ChartBars $matrix 1 $true)[0][6] -ne 4) {throw 'latest row'}
+$matrix.SetValue('--------',3,1)
 if (@(Get-ChartBars $matrix 420 $true).Count -ne 0) {throw 'empty chart'}
-$matrix.SetValue(46335,2,1)
-$matrix.SetValue($null,4,1)
+$matrix.SetValue(46335,3,1)
+$matrix.SetValue($null,5,1)
 if (@(Get-ChartBars $matrix 420 $true).Count -ne 4) {throw 'no marker, trailing blank'}
-$matrix.SetValue('2026/11/09',6,1)
+$matrix.SetValue('2026/11/09',7,1)
 Assert-Failure {Get-ChartBars $matrix 12 $true} 'chart_range_changed'
-$matrix.SetValue('changed',1,2)
+$matrix.SetValue('changed',2,2)
 Assert-Failure {Get-ChartBars $matrix 12 $false} 'chart_header'
 if (Test-Formula '=wrong' '=expected') {throw 'invalid formula accepted'}
 """

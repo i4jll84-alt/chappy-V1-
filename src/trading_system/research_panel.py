@@ -187,6 +187,8 @@ def save(db, symbols, data, start, end):
         "chart_symbols": 0,
         "current_day_chart_symbols": 0,
         "latest_chart_at": None,
+        "streaming_charts": 0,
+        "connection_required_charts": 0,
     }
     local_day = end.astimezone(JST).date().isoformat()
     with db:
@@ -217,6 +219,10 @@ def save(db, symbols, data, start, end):
                     (frame, index["code"], canonical(fields), "observed" if valid else "attention"),
                 )
         for x in items if state == "read" else []:
+            counts["streaming_charts"] += int(x.get("chart_status") == "streaming")
+            counts["connection_required_charts"] += int(
+                x.get("chart_status") == "connection_required"
+            )
             q = x["quote"]
             symbol = x["symbol"]
             quality = quote_state(q, end)
@@ -330,6 +336,7 @@ def run(
                 count = 0
                 next_full = 0
                 fast_retry_used = False
+                awaiting_stream = False
                 result = {}
                 while not (reason := stopped()):
                     begin = clock()
@@ -337,18 +344,27 @@ def run(
                     data = {**reader(book, symbols, rows), "requested_rows": rows}
                     result = save(db, symbols, data, begin, clock())
                     success = result["state"] == "read"
+                    streaming = result["streaming_charts"] == len(symbols)
                     if rows == 420:
                         # Keep one short poll between failed full reads so live quotes can progress.
                         next_full = count + (15 if success else 2)
+                    elif awaiting_stream and streaming:
+                        next_full = count + 1
+                    if success:
+                        awaiting_stream = not streaming
                     count += 1
                     status(**result, frames=count)
-                    if one_pass and (result["chart_symbols"] == len(symbols) or count >= 4):
-                        reason = (
-                            "one_pass_complete"
-                            if result["chart_symbols"] == len(symbols)
-                            else "incomplete_panel"
-                        )
-                        break
+                    if one_pass:
+                        if streaming and result["current_day_chart_symbols"] == len(symbols):
+                            reason = "one_pass_complete"
+                            break
+                        if count >= 4:
+                            reason = (
+                                "one_pass_recent_only"
+                                if streaming and result["chart_symbols"] == len(symbols)
+                                else "incomplete_panel"
+                            )
+                            break
                     if success:
                         fast_retry_used = False
                     wait_seconds = 15

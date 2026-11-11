@@ -82,18 +82,28 @@ function Read-Matrix($range, $property, $height, $width) {
     }
     return ,$matrix
 }
+function Get-ChartStatus($value, $formula) {
+    if ($value -isnot [string]) {return 'unknown'}
+    $parts = $value -split '=>',2
+    if ($parts.Count -ne 2 -or -not (Test-Formula $parts[0].Trim() $formula)) {return 'unknown'}
+    switch -CaseSensitive ($parts[1].Trim()) {
+        '配信中' {return 'streaming'}
+        'マーケットスピード II にログインして「接続中」の状態に変更してから利用してください。' {return 'connection_required'}
+        default {return 'unknown'}
+    }
+}
 function Get-ChartBars($matrix, $limit, $hasGuardRow) {
     for ($col=1; $col -le 7; $col++) {
-        if ($matrix.GetValue(1,$col) -cne $headers[$col-1]) {throw 'chart_header'}
+        if ($matrix.GetValue(2,$col) -cne $headers[$col-1]) {throw 'chart_header'}
     }
-    $last = 1
-    for ($row=2; $row -le $matrix.GetLength(0); $row++) {
+    $last = 2
+    for ($row=3; $row -le $matrix.GetLength(0); $row++) {
         $day = $matrix.GetValue($row,1)
         if ('--------' -ceq $day) {break}
         if ($null -ne $day -and '' -cne [string]$day) {$last=$row}
     }
     if ($hasGuardRow -and $last -eq $matrix.GetLength(0)) {throw 'chart_range_changed'}
-    for ($row=[Math]::Max(2,$last-$limit+1); $row -le $last; $row++) {
+    for ($row=[Math]::Max(3,$last-$limit+1); $row -le $last; $row++) {
         $bar = @(for ($col=1; $col -le 7; $col++) {,($matrix.GetValue($row,$col))})
         ,$bar
     }
@@ -158,12 +168,13 @@ try {
         # OHLCV all come from one Value2 call, including when the live range shrinks.
         $endRow=[Math]::Min(1048576,[Math]::Max(2,$bottom)+1)
         $stage='chart_snapshot'
-        $range=Get-ExcelProperty $ws 'Range' @("A2:G${endRow}")
-        $matrix=Read-Matrix $range 'Value2' ($endRow-1) 7
+        $range=Get-ExcelProperty $ws 'Range' @("A1:G${endRow}")
+        $matrix=Read-Matrix $range 'Value2' $endRow 7
+        $chartStatus=Get-ChartStatus ($matrix.GetValue(1,1)) $wanted
         $bars=@(Get-ChartBars $matrix $Rows ($endRow -gt $bottom))
         $stage='chart_formula_after'
         if(-not (Test-Formula (Get-ExcelProperty $anchor 'Formula2') $wanted)){throw 'chart'}
-        $result+=@{symbol=$symbol;quote=$q;bars=$bars}
+        $result+=@{symbol=$symbol;quote=$q;bars=$bars;chart_status=$chartStatus}
     }
     $stage='indexes'
     $affectedSymbol=$null

@@ -20,6 +20,7 @@ def sample():
         "items": [
             {
                 "symbol": c,
+                "chart_status": "streaming",
                 "quote": [
                     "2026/11/04",
                     100,
@@ -197,6 +198,80 @@ def test_evening_snapshot_opens_once_and_keeps_empty_minutes_and_indexes(tmp_pat
             "observed",
         )
     assert json.loads((tmp_path / "status.json").read_bytes())["reason"] == "one_pass_complete"
+
+
+@pytest.mark.parametrize(
+    ("feed", "bars_day", "expected", "calls"),
+    [
+        ("connection_required", "2026/11/04", "incomplete_panel", 4),
+        (None, "2026/11/04", "incomplete_panel", 4),
+        ("streaming", "2026/11/03", "one_pass_recent_only", 4),
+        ("recovered", "2026/11/04", "one_pass_complete", 2),
+    ],
+)
+def test_snapshot_checks_feed_and_date(tmp_path, monkeypatch, feed, bars_day, expected, calls):
+    now = T.replace(hour=20)
+    monkeypatch.setattr(p, "configuration", lambda _: (CODES, tmp_path / "test.xlsx"))
+    frames = []
+
+    def read(*_):
+        raw = sample()
+        for item in raw["items"]:
+            if feed is None:
+                del item["chart_status"]
+            elif feed == "recovered":
+                item["chart_status"] = "streaming" if frames else "connection_required"
+            else:
+                item["chart_status"] = feed
+            for bar in item["bars"]:
+                bar[0] = bars_day
+        frames.append(raw)
+        return raw
+
+    p.run(
+        tmp_path,
+        int(now.timestamp() * 1e9),
+        "none",
+        one_pass=True,
+        clock=lambda: now,
+        opener=lambda _: None,
+        reader=read,
+        sleep=lambda _: None,
+    )
+    status = json.loads((tmp_path / "status.json").read_bytes())
+    assert status["reason"] == expected and len(frames) == calls
+    assert status["connection_required_charts"] == (31 if feed == "connection_required" else 0)
+    with sqlite3.connect(tmp_path / "research.sqlite") as db:
+        saved = [
+            json.loads(gzip.decompress(r[0]))
+            for r in db.execute("select raw_gzip from frames order by id")
+        ]
+        assert [fr["items"] for fr in saved] == [fr["items"] for fr in frames]
+
+
+def test_daytime_refreshes_full_history_once_after_reconnection(tmp_path, monkeypatch):
+    monkeypatch.setattr(p, "configuration", lambda _: (CODES, tmp_path / "test.xlsx"))
+    sizes = []
+
+    def read(_book, _codes, rows):
+        sizes.append(rows)
+        data = sample()
+        if len(sizes) <= 2:
+            data["items"][0]["chart_status"] = "connection_required"
+        if len(sizes) == 5:
+            publish_stop(tmp_path)
+        return data
+
+    p.run(
+        tmp_path,
+        int(T.timestamp() * 1e9),
+        "none",
+        clock=lambda: T,
+        opener=lambda _: None,
+        reader=read,
+        sleep=lambda _: None,
+    )
+    assert sizes == [420, 12, 12, 420, 12]
 
 
 def test_start_failure_records_specific_reason_without_opening_excel(tmp_path, monkeypatch):

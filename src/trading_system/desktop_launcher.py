@@ -121,6 +121,10 @@ def panel_bar_dates(data):
     if data.get("latest_chart_at"):
         latest = datetime.fromisoformat(data["latest_chart_at"]).astimezone(ZoneInfo("Asia/Tokyo"))
         text += f"（最新 {latest:%m/%d %H:%M}）"
+    if "streaming_charts" in data:
+        text += f"、RSS配信中 {data['streaming_charts']}/31"
+    if data.get("connection_required_charts"):
+        text += "。MARKET SPEED IIのログインを確認し、Excelが「未接続」なら押してください。"
     return text
 
 
@@ -140,11 +144,14 @@ def research_result(project, requested_ns=0):
             )
         elif data["state"] == "stopped" and reason == "one_pass_complete":
             detail = f"一括取得・保存完了（分足 {data.get('chart_symbols', 0)}/31銘柄）"
+        elif data["state"] == "stopped" and reason == "one_pass_recent_only":
+            detail = "直近分足を保存。当日分は全銘柄で揃っていません"
         elif data["state"] == "needs_review":
-            detail = (
-                f"取得が未完了（分足 {data.get('chart_symbols', 0)}/31銘柄）。"
-                "研究用Excel・RSSの接続と応答を確認してください。"
-            )
+            detail = f"取得が未完了（分足 {data.get('chart_symbols', 0)}/31銘柄）"
+            if data.get("streaming_charts") == 31:
+                detail += "。当日分足が揃っていません"
+            elif not data.get("connection_required_charts"):
+                detail += "。研究用Excel・RSSの接続と応答を確認してください"
         elif data["state"] == "stopped":
             detail = "停止・保存完了"
         else:

@@ -33,6 +33,18 @@ def test_research_result_is_specific_fresh_and_never_claims_running(tmp_path):
         status["reason"] = reason
         (root / "status.json").write_text(json.dumps(status))
         assert "当日分足 0/31銘柄（最新 11/03 15:30）" in launcher.research_result(tmp_path)
+    status.update(state="needs_review", streaming_charts=0, connection_required_charts=31)
+    (root / "status.json").write_text(json.dumps(status))
+    assert "未接続" in launcher.research_result(tmp_path)
+    assert "RSS配信中 0/31" in launcher.research_result(tmp_path)
+    status.update(
+        state="stopped",
+        reason="one_pass_recent_only",
+        streaming_charts=31,
+        connection_required_charts=0,
+    )
+    (root / "status.json").write_text(json.dumps(status))
+    assert "当日分は全銘柄で揃っていません" in launcher.research_result(tmp_path)
     status.update(state="read")
     (root / "status.json").write_text(json.dumps(status))
     assert launcher.research_result(tmp_path) is None
