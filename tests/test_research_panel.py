@@ -72,6 +72,32 @@ def test_frame_revisions_and_bid_ask_are_known_only_when_read():
         assert db.execute("select count(*) from quotes").fetchone()[0] == 93
 
 
+def test_chart_dates_use_valid_rows_and_tokyo_observation_date():
+    payload = sample()
+    next_day = T.replace(day=5, hour=0, minute=5).astimezone(p.UTC)
+    with sqlite3.connect(":memory:") as db:
+        p.initialize(db)
+
+        def record():
+            return p.save(db, CODES, payload, next_day, next_day)
+
+        old = record()
+        assert old["state"] == "read" and old["chart_symbols"] == 31
+        assert old["current_day_chart_symbols"] == 0
+        assert old["latest_chart_at"] == T.isoformat()
+        today = ["2026/11/05", "00:02", "", "", "", "", 0]
+        payload["items"][0]["bars"].append(today)
+        payload["items"][1]["bars"].extend([today, [*today[:2], 10, 10, 10, 10, 100]])
+        payload["items"][2]["bars"].append(["2026/11/05", "00:06", 10, 10, 10, 10, 100])
+        mixed = record()
+        assert mixed["current_day_chart_symbols"] == 1 and mixed["invalid_bars"] == 2
+        assert mixed["latest_chart_at"] == "2026-11-05T00:02:00+09:00"
+        for item in payload["items"]:
+            item["bars"] = []
+        empty = record()
+        assert empty["current_day_chart_symbols"] == 0 and empty["latest_chart_at"] is None
+
+
 def test_bad_and_conflicting_bars_are_raw_only():
     payload = sample()
     item = payload["items"][0]

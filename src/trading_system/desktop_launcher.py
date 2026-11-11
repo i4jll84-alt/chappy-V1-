@@ -114,6 +114,16 @@ def rakuten_progress(project, requested_ns):
     return None
 
 
+def panel_bar_dates(data):
+    if "current_day_chart_symbols" not in data:
+        return ""
+    text = f"、当日分足 {data['current_day_chart_symbols']}/31銘柄"
+    if data.get("latest_chart_at"):
+        latest = datetime.fromisoformat(data["latest_chart_at"]).astimezone(ZoneInfo("Asia/Tokyo"))
+        text += f"（最新 {latest:%m/%d %H:%M}）"
+    return text
+
+
 def research_result(project, requested_ns=0):
     """A terminal result is a past capture, never evidence that a collector is active."""
     from trading_system.research_panel import FAILURE_MESSAGES
@@ -139,6 +149,8 @@ def research_result(project, requested_ns=0):
             detail = "停止・保存完了"
         else:
             return None
+        if data["state"] in {"stopped", "needs_review"}:
+            detail += panel_bar_dates(data)
         stamp = at.astimezone(ZoneInfo("Asia/Tokyo"))
         return f"前回 {stamp:%m/%d %H:%M}：{detail}"
     except (OSError, ValueError, KeyError, TypeError, OverflowError):
@@ -709,7 +721,8 @@ class Launcher:
                                 if data["state"] == "read":
                                     text = (
                                         f"直近の有効気配 {data['books']}/31銘柄、"
-                                        f"確認した分足 {data['valid_bars_seen']}本"
+                                        f"確認した価格付き分足 {data['valid_bars_seen']}本"
+                                        + panel_bar_dates(data)
                                     )
                                 elif data["state"] not in ("starting", "stopped"):
                                     text = "研究用Excel・RSSの応答待ち（自動再確認）"

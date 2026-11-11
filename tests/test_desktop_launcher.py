@@ -27,6 +27,12 @@ def test_research_result_is_specific_fresh_and_never_claims_running(tmp_path):
     status.update(state="stopped", reason="one_pass_complete", chart_symbols=31)
     (root / "status.json").write_text(json.dumps(status))
     assert "保存完了（分足 31/31銘柄）" in launcher.research_result(tmp_path)
+    assert "当日分足" not in launcher.research_result(tmp_path)
+    status.update(current_day_chart_symbols=0, latest_chart_at="2026-11-03T15:30:00+09:00")
+    for reason in ("daytime_1600", "one_pass_complete"):
+        status["reason"] = reason
+        (root / "status.json").write_text(json.dumps(status))
+        assert "当日分足 0/31銘柄（最新 11/03 15:30）" in launcher.research_result(tmp_path)
     status.update(state="read")
     (root / "status.json").write_text(json.dumps(status))
     assert launcher.research_result(tmp_path) is None

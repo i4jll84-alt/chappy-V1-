@@ -185,7 +185,10 @@ def save(db, symbols, data, start, end):
         "invalid_bars": 0,
         "empty_price_minutes": 0,
         "chart_symbols": 0,
+        "current_day_chart_symbols": 0,
+        "latest_chart_at": None,
     }
+    local_day = end.astimezone(JST).date().isoformat()
     with db:
         frame = db.execute(
             "INSERT INTO frames(started_at,known_at,state,raw_gzip) VALUES(?,?,?,?)",
@@ -253,6 +256,11 @@ def save(db, symbols, data, start, end):
                     counts["invalid_bars"] += 1
             counts["invalid_bars"] += len(conflicts)
             counts["chart_symbols"] += int(len(parsed) > len(conflicts))
+            latest = max((k for k in parsed if k not in conflicts), default=None)
+            if latest is not None:
+                counts["current_day_chart_symbols"] += int(latest[:10] == local_day)
+                if counts["latest_chart_at"] is None or latest > counts["latest_chart_at"]:
+                    counts["latest_chart_at"] = latest
             for key, values in parsed.items():
                 if key in conflicts:
                     continue
