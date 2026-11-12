@@ -740,7 +740,12 @@ class Launcher:
                             data = json.loads(
                                 (collector_root(self.project, broker) / "status.json").read_bytes()
                             )
-                            if data.get("state") == "prompt":
+                            if data.get("state") == "waiting_for_station":
+                                text = (
+                                    "kabuステーションのAPI待ち。"
+                                    "アプリの起動・ログインとAPI設定を確認してください。"
+                                )
+                            elif data.get("state") == "prompt":
                                 text = "PCの専用画面でAPIパスワードを入力してください。"
                             elif data.get("state") == "recording":
                                 text = f"板を巡回中（累計{data['board_reads']}回照会）"

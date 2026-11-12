@@ -3,12 +3,15 @@
 import argparse
 import gzip
 import json
+import socket
 import sqlite3
 import time
 from datetime import UTC, datetime, timedelta
+from urllib.parse import urlsplit
 
 from trading_system.brokers.locking import single_writer
 from trading_system.brokers.mufg_esmart.capture import password_prompt
+from trading_system.brokers.mufg_esmart.connection_check import BASE
 from trading_system.brokers.mufg_esmart.market_data import Client
 from trading_system.research_panel import JST, PROJECT, number, panel_symbols
 from trading_system.rss_stop import can_start
@@ -107,6 +110,15 @@ def store_sample(db, record, raw):
     return quality
 
 
+def api_listening():
+    endpoint = urlsplit(BASE)
+    try:
+        with socket.create_connection((endpoint.hostname, endpoint.port), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
 def run(
     project,
     requested,
@@ -117,6 +129,7 @@ def run(
     sleep=time.sleep,
     prompt=password_prompt,
     client_factory=Client,
+    listener_ready=api_listening,
 ):
     root = project / "data/mufg-panel"
     shared = project / "data/mufg-continuous"
@@ -140,6 +153,22 @@ def run(
             sharing_retries=50,
         )
 
+    def wait_for_listener(reads):
+        waiting = False
+        while not (reason := stopped()):
+            if one_pass and time.monotonic() >= prompt_timeout:
+                return "station_wait_timeout"
+            if listener_ready():
+                return stopped()
+            if not waiting:
+                status("waiting_for_station", board_reads=reads)
+                waiting = True
+            for _ in range(10):
+                if stopped() or (one_pass and time.monotonic() >= prompt_timeout):
+                    break
+                sleep(0.5)
+        return reason
+
     with single_writer(root):
         now = clock().astimezone(JST)
         if now.date() != requested_day.date() or (
@@ -158,10 +187,13 @@ def run(
                         json.loads((project / "data/rss-panel/panel.json").read_bytes())
                     )
                 ]
-                status("prompt")
-                if stopped():
-                    status("stopped", stopped())
+                reason = wait_for_listener(0)
+                if reason:
+                    status(
+                        "needs_review" if reason == "station_wait_timeout" else "stopped", reason
+                    )
                     return
+                status("prompt")
 
                 def prompt_stop():
                     return stopped() or (one_pass and time.monotonic() >= prompt_timeout)
@@ -198,6 +230,12 @@ def run(
                                         retry.append(code)
                                 index = (index + 1) % len(symbols)
                                 reads += 1
+                            if quality == "network_request_failed" and not one_pass:
+                                # A closed station cannot accept authentication or board requests.
+                                # Keep the failed sample, wait for its listener, then resume.
+                                reason = wait_for_listener(reads)
+                                if reason:
+                                    break
                             failures = 0 if record["outcome"] == "ok" else failures + 1
                             if (
                                 quality == "registration_limit"

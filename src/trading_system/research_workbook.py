@@ -25,7 +25,8 @@ INDEX_FIELDS = ("現在日付", "更新時刻", "現在値")
 
 def expected_cells(symbols):
     """Map each sheet to its fixed text cells and permitted formulas."""
-    text = {f"{chr(65 + j)}1": value for j, value in enumerate(("銘柄", *FIELDS))}
+    # A1 is a display caption. The reader uses the field names in B1:K1 and codes in A2:A32.
+    text = {f"{chr(col)}1": field for col, field in enumerate(FIELDS, start=66)}
     formulas = {}
     for row, symbol in enumerate(symbols, 2):
         text[f"A{row}"] = symbol

@@ -376,6 +376,20 @@ def test_kabu_research_lock_is_not_shown_as_a_running_connection_check(tmp_path)
     assert "起動中" in view.status["kabu_panel"].set.call_args.args[0]
 
 
+def test_kabu_station_wait_has_separate_status_from_password_prompt(tmp_path):
+    view = research_view(tmp_path, "both")
+    view.window = Mock()
+    view.status = {b: Mock() for b in launcher.CAPTURES}
+    view.busy = lambda broker: broker == "kabu_panel"
+    view.refresh_daily_save = Mock()
+    folder = launcher.collector_root(tmp_path, "kabu_panel")
+    folder.mkdir(parents=True)
+    for state, message in [("waiting_for_station", "API待ち"), ("prompt", "APIパスワード")]:
+        (folder / "status.json").write_text(json.dumps({"state": state}))
+        view.refresh()
+        assert message in view.status["kabu_panel"].set.call_args.args[0]
+
+
 def test_refresh_reports_only_current_rakuten_recovery(tmp_path):
     root = launcher.collector_root(tmp_path, "rakuten")
     root.mkdir(parents=True)

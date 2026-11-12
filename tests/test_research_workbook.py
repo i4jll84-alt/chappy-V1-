@@ -92,11 +92,12 @@ def test_excel_save_cache_format_and_shared_strings_do_not_block_restart(tmp_pat
     parts = fixture(tmp_path)
     assert panel.configuration(tmp_path)[0] == CODES
     sheet = ET.fromstring(parts["xl/worksheets/sheet1.xml"])
-    first = sheet.find(".//s:c[@r='A1']", NS)
+    first = sheet.find(".//s:c[@r='B1']", NS)
     first.remove(first.find("s:is", NS))
     first.set("t", "s")
     ET.SubElement(first, f"{{{NS['s']}}}v").text = "0"
-    parts["xl/sharedStrings.xml"] = f'<sst xmlns="{NS["s"]}"><si><t>銘柄</t></si></sst>'.encode()
+    shared = f'<sst xmlns="{NS["s"]}"><si><t>現在日付</t></si></sst>'
+    parts["xl/sharedStrings.xml"] = shared.encode()
     for c in sheet.findall(".//s:c", NS):
         f = c.find("s:f", NS)
         if f is not None:
@@ -110,6 +111,24 @@ def test_excel_save_cache_format_and_shared_strings_do_not_block_restart(tmp_pat
         hashlib.sha256((tmp_path / panel.BOOK_NAME).read_bytes()).hexdigest()
         != json.loads((tmp_path / "panel.json").read_text())["workbook_sha256"]
     )
+    assert panel.configuration(tmp_path)[0] == CODES
+
+
+@pytest.mark.parametrize("caption", ["number", "empty"])
+def test_display_only_quote_caption_does_not_block_capture(tmp_path, caption):
+    parts = fixture(tmp_path)
+    key = "xl/worksheets/sheet1.xml"
+    sheet = ET.fromstring(parts[key])
+    row = sheet.find("s:sheetData/s:row[@r='1']", NS)
+    cell = row.find("s:c[@r='A1']", NS)
+    if caption == "empty":
+        row.remove(cell)
+    else:
+        cell.remove(cell.find("s:is", NS))
+        del cell.attrib["t"]
+        ET.SubElement(cell, f"{{{NS['s']}}}v").text = "12345678"
+    parts[key] = ET.tostring(sheet)
+    write(tmp_path, parts)
     assert panel.configuration(tmp_path)[0] == CODES
 
 
