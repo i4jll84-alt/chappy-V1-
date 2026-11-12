@@ -38,7 +38,19 @@ def numeric(v):
         return None
 
 
-def store_sample(db, record, raw):
+def current_market_time(value, known):
+    try:
+        at = datetime.fromisoformat(value)
+        return (
+            at.utcoffset() is not None
+            and at <= known
+            and at.astimezone(JST).date() == known.astimezone(JST).date()
+        )
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def store_sample(db, record, raw, *, current_symbols=None):
     status = record["http_status"]
     symbol = record["code"]
     op = record["operation"]
@@ -105,8 +117,16 @@ def store_sample(db, record, raw):
             ),
         ).lastrowid
         db.executemany(
-            "INSERT INTO levels VALUES(?,?,?,?,?,?)", [(frame, *level) for level in levels]
+            "INSERT INTO levels VALUES(?,?,?,?,?,?)",
+            [(frame, *level) for level in levels],
         )
+    if board and current_symbols is not None:
+        priced_times = [(numeric(board.get("CurrentPrice")), board.get("CurrentPriceTime"))]
+        priced_times.extend((px, at) for _, _, px, qty, at in levels if qty > 0)
+        if any(
+            px is not None and px > 0 and current_market_time(at, known) for px, at in priced_times
+        ):
+            current_symbols.add(symbol)
     return quality
 
 
@@ -190,7 +210,8 @@ def run(
                 reason = wait_for_listener(0)
                 if reason:
                     status(
-                        "needs_review" if reason == "station_wait_timeout" else "stopped", reason
+                        "needs_review" if reason == "station_wait_timeout" else "stopped",
+                        reason,
                     )
                     return
                 status("prompt")
@@ -202,6 +223,7 @@ def run(
                 if stopped() or not password:
                     status("stopped", stopped() or "prompt_cancelled")
                     return
+                status("authenticating")
                 client = client_factory(password, board_symbols=symbols, clock=clock)
                 password = None
                 try:
@@ -214,12 +236,20 @@ def run(
                         last_quality = None
                         retry = []
                         observed = set()
+                        current_symbols = set()
+                        last_board_at = None
                         while not (reason := stopped()):
                             code = (
                                 retry[0] if one_pass and reads >= len(symbols) else symbols[index]
                             )
                             record, raw = client.read(code)
-                            quality = store_sample(db, record, raw)
+                            previous_count = len(current_symbols)
+                            quality = store_sample(db, record, raw, current_symbols=current_symbols)
+                            if quality in {
+                                "observed_book",
+                                "incomplete_or_crossed_book",
+                            }:
+                                last_board_at = record["read_completed_at"]
                             if record["operation"] == "board":
                                 if quality == "observed_book":
                                     observed.add(code)
@@ -251,12 +281,18 @@ def run(
                             if one_pass and reads >= len(symbols) and not retry:
                                 reason = "one_pass_complete"
                                 break
-                            if reads % len(symbols) == 0 or last_quality != quality:
+                            if (
+                                reads % len(symbols) == 0
+                                or last_quality != quality
+                                or previous_count != len(current_symbols)
+                            ):
                                 status(
                                     "recording",
                                     quality,
                                     board_reads=reads,
                                     last_symbol=record["code"],
+                                    current_day_board_symbols=len(current_symbols),
+                                    last_board_at=last_board_at,
                                 )
                                 last_quality = quality
                             wait = (
@@ -275,18 +311,19 @@ def run(
                             reason,
                             board_reads=reads,
                             symbols_with_book=len(observed),
+                            current_day_board_symbols=len(current_symbols),
+                            last_board_at=last_board_at,
                         )
                     finally:
                         db.close()
                 finally:
                     client.close()
         except Exception as exc:
-            status(
-                "failed",
-                "collector_already_active"
-                if str(exc) == "broker_state_already_open"
-                else "check_local_capture",
-            )
+            reasons = {
+                "broker_state_already_open": "collector_already_active",
+                "api_password_format_invalid": "api_password_format_invalid",
+            }
+            status("failed", reasons.get(str(exc), "check_local_capture"))
             raise
 
 
@@ -295,7 +332,9 @@ def main():
     p.add_argument("--requested", type=int, required=True)
     p.add_argument("--resume", default="none")
     p.add_argument(
-        "--snapshot-now", action="store_true", help="Manual one-pass read, including after close"
+        "--snapshot-now",
+        action="store_true",
+        help="Manual one-pass read, including after close",
     )
     a = p.parse_args()
     run(PROJECT, a.requested, a.resume, one_pass=a.snapshot_now)

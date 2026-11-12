@@ -10,7 +10,9 @@ from time import time_ns
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
+from trading_system.research_status import active_status, terminal_guidance
 from trading_system.rss_stop import publish_stop, stop_ticket
+from trading_system.tk_startup import create_window
 
 BROKERS = ("rakuten", "mufg_esmart")
 RESEARCH = {"rakuten": "panel", "mufg_esmart": "kabu_panel"}
@@ -33,10 +35,50 @@ PROJECT = Path(__file__).resolve().parents[2]
 def default_settings():
     local = Path(os.environ["LOCALAPPDATA"])
     return {
-        "brokers": ["rakuten"],
+        "brokers": list(BROKERS),
         "rakuten_app": str(local / "MarketSpeed2/Bin/MarketSpeed2.exe"),
         "mufg_app": str(local / "kabuStation/KabuS.exe"),
     }
+
+
+def open_vendor(name, path):
+    if name == "rakuten_app" and path.suffix.lower() == ".exe":
+        executable = path.absolute()
+        os.startfile(executable, cwd=executable.parent)
+    else:
+        os.startfile(path)
+
+
+def ensure_broker_app(project, source, path):
+    """Run outside Tk. Only open an app if the current Windows session lacks it."""
+    name = "rakuten_app" if source == "rakuten" else "mufg_app"
+    shell = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
+    if not path.is_file():
+        raise FileNotFoundError
+    result = subprocess.run(
+        [
+            str(shell),
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(project / "scripts/broker_app_running.ps1"),
+            "-AppPath",
+            str(path.absolute()),
+            "-Broker",
+            source,
+        ],
+        timeout=10,
+        creationflags=subprocess.CREATE_NO_WINDOW,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if result.returncode == 3:
+        open_vendor(name, path)
+    elif result.returncode != 0:
+        raise OSError("broker_app_probe_failed")
 
 
 def validate_settings(value):
@@ -97,7 +139,10 @@ def rakuten_progress(project, requested_ns):
             return None
         phase = data["phase"]
         if phase == "restoring":
-            done, total = data.get("recovery_runs_checked"), data.get("recovery_runs_total")
+            done, total = (
+                data.get("recovery_runs_checked"),
+                data.get("recovery_runs_total"),
+            )
             if type(done) is int and type(total) is int and 0 <= done <= total:
                 return f"過去データを復元中（{done:,} / {total:,} 組）"
             return "過去データを復元中"
@@ -128,16 +173,25 @@ def panel_bar_dates(data):
     return text
 
 
-def research_result(project, requested_ns=0):
+def research_result(project, requested_ns=0, broker="panel"):
     """A terminal result is a past capture, never evidence that a collector is active."""
     from trading_system.research_panel import FAILURE_MESSAGES
 
     try:
-        data = json.loads((collector_root(project, "panel") / "status.json").read_bytes())
+        data = json.loads((collector_root(project, broker) / "status.json").read_bytes())
         at = datetime.fromisoformat(data["updated_at"])
         if at.tzinfo is None or at.timestamp() < requested_ns / 1e9:
             return None
         reason = data.get("reason")
+        stamp = at.astimezone(ZoneInfo("Asia/Tokyo"))
+        if data["state"] not in {"stopped", "not_started", "failed", "needs_review"}:
+            return None
+        guidance = terminal_guidance(data["state"], reason)
+        if broker == "kabu_panel" or data["state"] == "not_started":
+            detail = guidance or "停止。再開するには研究取得ボタンを押してください。"
+            if reason == "one_pass_complete":
+                detail += f" 有効な板 {data.get('symbols_with_book', 0)}/31銘柄。"
+            return f"前回 {stamp:%m/%d %H:%M}：{detail}"
         if data["state"] == "failed":
             detail = "異常終了：" + FAILURE_MESSAGES.get(
                 reason, "Excelと保存先を確認してください。"
@@ -158,7 +212,10 @@ def research_result(project, requested_ns=0):
             return None
         if data["state"] in {"stopped", "needs_review"}:
             detail += panel_bar_dates(data)
-        stamp = at.astimezone(ZoneInfo("Asia/Tokyo"))
+        if reason == "manual_stop":
+            detail += "。再開するには研究取得ボタンを押してください。"
+        elif reason == "daytime_1600":
+            detail += "。16時の定時終了です。"
         return f"前回 {stamp:%m/%d %H:%M}：{detail}"
     except (OSError, ValueError, KeyError, TypeError, OverflowError):
         return None
@@ -254,6 +311,10 @@ class Launcher:
         self.window, self.project = window, project
         self.children = {}
         self.stopping = set()
+        self.vendor_executor = ThreadPoolExecutor(max_workers=len(BROKERS))
+        self.vendor_tasks = {}
+        self.start_notes = {}
+        self.requested = {}
         self.daily_executor = ThreadPoolExecutor(max_workers=1)
         self.daily_task = None
         self.daily_root = None
@@ -281,7 +342,8 @@ class Launcher:
         frame.pack(fill="both", expand=True)
         ttk.Label(frame, text="個別株データ取得", style="Title.TLabel").pack(anchor="w")
         ttk.Label(
-            frame, text="毎朝は証券会社を選び、「選択した証券会社の研究取得」を1回押します。"
+            frame,
+            text="「両方」を選んで研究取得を押すと、両社のアプリと取得が起動します。",
         ).pack(anchor="w", pady=(4, 8))
         selection = ttk.LabelFrame(frame, text="対象の証券会社", padding=12)
         selection.pack(fill="x")
@@ -312,14 +374,16 @@ class Launcher:
         ).pack(side="left", padx=7)
         ttk.Label(
             frame,
-            text="楽天：ExcelのRSSを「接続中・発注不可」にして開始します。\nカブコム：APIパスワードは開始時に入力します。保存しません。",
+            text="楽天：ログイン後、ExcelのRSSが「未接続」なら接続してください。\nカブコム：APIパスワードは開始時に入力します。保存しません。",
             wraplength=740,
             justify="left",
         ).pack(anchor="w", pady=(0, 12))
         actions = ttk.Frame(frame)
         actions.pack(fill="x")
         ttk.Button(
-            actions, text="選択した証券会社の研究取得（31銘柄）", command=self.start_research
+            actions,
+            text="選択した証券会社の研究取得（31銘柄）",
+            command=self.start_research,
         ).pack(side="left", padx=(0, 10))
         ttk.Button(actions, text="すべての取得を停止", command=self.stop_all).pack(side="left")
         ttk.Button(actions, text="設定", command=self.configure).pack(side="right")
@@ -337,7 +401,6 @@ class Launcher:
         status_frame = ttk.LabelFrame(frame, text="稼働状態", padding=12)
         status_frame.pack(fill="x", pady=10)
         self.status = {broker: tk.StringVar() for broker in CAPTURES}
-        self.panel_requested_ns = 0
         for broker in (*RESEARCH.values(), *BROKERS):
             ttk.Label(status_frame, textvariable=self.status[broker], wraplength=710).pack(
                 anchor="w", pady=2
@@ -358,7 +421,7 @@ class Launcher:
             justify="left",
         ).pack(anchor="w")
         self.message = tk.StringVar(
-            value="両社を記録する場合は、両方の証券アプリにログインして「両方」を選んでください。"
+            value="ログインや入力が必要な場合は、稼働状態の各社の案内に従ってください。"
         )
         ttk.Label(frame, textvariable=self.message, foreground="#7A233B", wraplength=740).pack(
             anchor="w", pady=(12, 0)
@@ -468,12 +531,7 @@ class Launcher:
             )
             return
         try:
-            if name == "rakuten_app" and path.suffix.lower() == ".exe":
-                # MARKET SPEED II resolves Config/Localize from its working directory.
-                executable = path.absolute()
-                os.startfile(executable, cwd=executable.parent)
-            else:
-                os.startfile(path)
+            open_vendor(name, path)
         except OSError:
             messagebox.showerror("アプリ", "アプリを開けません。設定の保存先を確認してください。")
 
@@ -501,7 +559,8 @@ class Launcher:
             for broker in chosen:
                 if broker == "mufg_esmart" and self.busy("kabu_panel"):
                     messagebox.showinfo(
-                        "接続確認", "カブコムの研究取得中です。接続確認は取得終了後に行えます。"
+                        "接続確認",
+                        "カブコムの研究取得中です。接続確認は取得終了後に行えます。",
                     )
                     return
                 if self.busy(broker):
@@ -566,25 +625,80 @@ class Launcher:
             save_settings(self.settings_path, settings)
         except (OSError, ValueError):
             messagebox.showerror(
-                "研究取得", "証券会社の選択を保存できません。設定と保存先を確認してください。"
+                "研究取得",
+                "証券会社の選択を保存できません。設定と保存先を確認してください。",
             )
             return
         self.settings = settings
-        messages = []
         for source in chosen:
             broker = RESEARCH[source]
+            if broker in self.vendor_tasks:
+                continue
+            self.start_notes.pop(broker, None)
+            try:
+                if self.busy(broker) and broker in self.stopping:
+                    continue
+                if source == "mufg_esmart" and not self.busy(broker) and self.busy(source):
+                    self.start_notes[broker] = (
+                        "接続確認中。終了後に研究取得ボタンを押してください。"
+                    )
+                    continue
+                self.stopping.discard(broker)
+                if datetime.fromtimestamp(requested / 1e9, ZoneInfo("Asia/Tokyo")).hour < 6:
+                    self.start_notes[broker] = (
+                        "開始時間外。6:00以降に研究取得ボタンを押してください。"
+                    )
+                    continue
+                key = "rakuten_app" if source == "rakuten" else "mufg_app"
+                task = self.vendor_executor.submit(
+                    ensure_broker_app, self.project, source, Path(settings[key])
+                )
+                self.vendor_tasks[broker] = (task, requested, late)
+            except (OSError, RuntimeError):
+                self.start_notes[broker] = (
+                    "起動を確認できません。設定を確認して再度開始してください。"
+                )
+        self.message.set("選択した証券会社の状態と必要な操作は「稼働状態」で確認できます。")
+        self.refresh_research_starts()
+
+    def refresh_research_starts(self):
+        for broker, (task, requested, late) in list(self.vendor_tasks.items()):
+            if not task.done():
+                continue
+            del self.vendor_tasks[broker]
+            if broker in self.stopping:
+                continue
+            try:
+                task.result()
+            except OSError as exc:
+                if getattr(exc, "winerror", None) in {1260, 4551}:
+                    self.start_notes[broker] = (
+                        "Windowsがアプリの起動をブロックしました。"
+                        "設定で正規の証券アプリを指定し、再度開始してください。"
+                    )
+                else:
+                    self.start_notes[broker] = (
+                        "証券アプリを開けません。設定のアプリの場所を確認して再度開始してください。"
+                    )
+                continue
+            except subprocess.TimeoutExpired:
+                self.start_notes[broker] = (
+                    "証券アプリの起動確認が時間切れです。少し待って研究取得を押してください。"
+                )
+                continue
             try:
                 if self.busy(broker):
-                    result = "停止処理中" if broker in self.stopping else "起動済み"
-                elif source == "mufg_esmart" and self.busy(source):
-                    result = "接続確認中のため開始できません"
-                else:
-                    self.launch_research(broker, requested, late)
-                    result = "引け後の一括取得を開始" if late else "開始"
+                    continue
+                if broker == "kabu_panel" and self.busy("mufg_esmart"):
+                    self.start_notes[broker] = (
+                        "接続確認中。終了後に研究取得ボタンを押してください。"
+                    )
+                    continue
+                self.launch_research(broker, requested, late)
             except (OSError, ValueError):
-                result = "起動できません。設定と保存先を確認してください"
-            messages.append(f"{NAMES[broker]}：{result}")
-        self.message.set(" ／ ".join(messages))
+                self.start_notes[broker] = (
+                    "取得を起動できません。設定と保存先を確認して再度開始してください。"
+                )
 
     def launch_research(self, broker, requested, late):
         root = collector_root(self.project, broker)
@@ -610,13 +724,16 @@ class Launcher:
             cwd=self.project,
             creationflags=subprocess.CREATE_NO_WINDOW,
         )
-        if broker == "panel":
-            self.panel_requested_ns = requested
+        self.requested[broker] = requested
         self.stopping.discard(broker)
 
     def stop_all(self):
         from tkinter import messagebox
 
+        for task, _, _ in self.vendor_tasks.values():
+            task.cancel()
+        self.vendor_tasks.clear()
+        self.start_notes.clear()
         failed = []
         for broker in CAPTURES:
             try:
@@ -699,6 +816,8 @@ class Launcher:
         ttk.Button(frame, text="設定を保存", command=save).pack(anchor="e", pady=8)
 
     def refresh(self):
+        self.refresh_research_starts()
+        now = datetime.fromtimestamp(time_ns() / 1e9, UTC)
         for broker in CAPTURES:
             try:
                 child = self.children.get(broker)
@@ -716,53 +835,45 @@ class Launcher:
                         detail = rakuten_progress(self.project, self.rakuten_requested_ns)
                         if detail:
                             text = ("停止要求済み / " if broker in self.stopping else "") + detail
-                    if broker == "panel" and broker not in self.stopping:
+                    if broker in RESEARCH.values() and broker not in self.stopping:
                         try:
                             data = json.loads(
                                 (collector_root(self.project, broker) / "status.json").read_bytes()
                             )
+                            updated = datetime.fromisoformat(data["updated_at"])
                             if (
-                                datetime.fromisoformat(data["updated_at"]).timestamp()
-                                >= self.panel_requested_ns / 1e9
+                                updated.utcoffset() is not None
+                                and updated.timestamp() >= self.requested.get(broker, 0) / 1e9
                             ):
-                                if data["state"] == "read":
-                                    text = (
-                                        f"直近の有効気配 {data['books']}/31銘柄、"
-                                        f"確認した価格付き分足 {data['valid_bars_seen']}本"
-                                        + panel_bar_dates(data)
-                                    )
-                                elif data["state"] not in ("starting", "stopped"):
-                                    text = "研究用Excel・RSSの応答待ち（自動再確認）"
-                        except (OSError, ValueError, KeyError, TypeError):
-                            pass
-                    if broker == "kabu_panel" and broker not in self.stopping:
-                        try:
-                            data = json.loads(
-                                (collector_root(self.project, broker) / "status.json").read_bytes()
-                            )
-                            if data.get("state") == "waiting_for_station":
-                                text = (
-                                    "kabuステーションのAPI待ち。"
-                                    "アプリの起動・ログインとAPI設定を確認してください。"
-                                )
-                            elif data.get("state") == "prompt":
-                                text = "PCの専用画面でAPIパスワードを入力してください。"
-                            elif data.get("state") == "recording":
-                                text = f"板を巡回中（累計{data['board_reads']}回照会）"
-                        except (ValueError, KeyError, OSError):
-                            pass
+                                text = active_status(broker, data, now)
+                        except (
+                            OSError,
+                            ValueError,
+                            KeyError,
+                            TypeError,
+                            OverflowError,
+                        ):
+                            text = "起動中・今回の状態報告を待っています。"
                 elif child is not None:
                     text = "終了。取得画面と保存記録で結果を確認してください。"
                     if child.returncode:
                         text = "異常終了。取得画面と保存記録を確認してください。"
                 else:
                     text = "停止中。保存済みの過去の状態は現在の稼働を示しません。"
-                if broker == "panel" and not active:
-                    detail = research_result(
-                        self.project, self.panel_requested_ns if child is not None else 0
-                    )
-                    if detail:
-                        text = detail
+                if broker in RESEARCH.values():
+                    if not active:
+                        detail = research_result(
+                            self.project, self.requested.get(broker, 0), broker
+                        )
+                        if detail:
+                            text = detail
+                        elif child is None:
+                            text = "停止中。開始するには研究取得ボタンを押してください。"
+                    if broker in self.vendor_tasks:
+                        if not active:
+                            text = "証券アプリを起動確認中。お待ちください。"
+                    elif broker in self.start_notes:
+                        text = (text + " ／ " if active else "") + self.start_notes[broker]
             except OSError:
                 text = "状態を確認できません。取得画面を確認してください。"
             self.status[broker].set(NAMES[broker] + "：" + text)
@@ -779,12 +890,13 @@ class Launcher:
             active = any(self.busy(b) for b in CAPTURES)
         except OSError:
             active = True
-        if active:
+        if active or self.vendor_tasks:
             messagebox.showinfo(
                 "終了前の確認",
                 "取得または入力待ちが残っています。停止ボタンを押し、保存完了後に終了してください。",
             )
         else:
+            self.vendor_executor.shutdown(wait=False)
             self.daily_executor.shutdown(wait=False)
             self.window.destroy()
 
@@ -795,7 +907,7 @@ def main():
 
     from trading_system.brokers.locking import single_writer
 
-    window = tk.Tk()
+    window = create_window(tk)
     window.withdraw()
     try:
         with single_writer(PROJECT / "data" / "desktop-launcher"):

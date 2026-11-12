@@ -9,6 +9,7 @@ from unittest.mock import Mock
 import pytest
 
 from trading_system import desktop_launcher as gui
+from trading_system import tk_startup
 from trading_system.brokers import market_data
 from trading_system.brokers.locking import single_writer
 from trading_system.brokers.mufg_esmart import capture
@@ -219,8 +220,8 @@ def test_prompt_recovers_from_transient_library_read(monkeypatch, script):
     create = Mock(side_effect=[tk.TclError(f"Can't find a usable {script}"), window])
     monkeypatch.setattr(tk, "Tk", create)
     delay = Mock()
-    monkeypatch.setattr(capture, "sleep", delay)
-    assert capture._prompt_window(tk, lambda: None) is window
+    monkeypatch.setattr(tk_startup, "sleep", delay)
+    assert tk_startup.create_window(tk, lambda: None) is window
     delay.assert_called_once_with(0.05)
     assert create.call_count == 2
 
@@ -232,8 +233,8 @@ def test_stop_during_tk_retry_prevents_another_window(monkeypatch, reason):
     pending_stop = []
     create = Mock(side_effect=tk.TclError("Can't find a usable tk.tcl"))
     monkeypatch.setattr(tk, "Tk", create)
-    monkeypatch.setattr(capture, "sleep", lambda _: pending_stop.append(reason))
-    assert capture._prompt_window(tk, lambda: next(iter(pending_stop), None)) is None
+    monkeypatch.setattr(tk_startup, "sleep", lambda _: pending_stop.append(reason))
+    assert tk_startup.create_window(tk, lambda: next(iter(pending_stop), None)) is None
     create.assert_called_once()
 
 
@@ -246,7 +247,7 @@ def test_persistent_or_unrelated_tk_error_is_reported(monkeypatch, message, atte
     create = Mock(side_effect=tk.TclError(message))
     monkeypatch.setattr(tk, "Tk", create)
     delay = Mock()
-    monkeypatch.setattr(capture, "sleep", delay)
+    monkeypatch.setattr(tk_startup, "sleep", delay)
     with pytest.raises(tk.TclError, match=message):
-        capture._prompt_window(tk, lambda: None)
+        tk_startup.create_window(tk, lambda: None)
     assert create.call_count == attempts and delay.call_count == attempts - 1

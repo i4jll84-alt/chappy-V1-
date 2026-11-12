@@ -10,6 +10,7 @@ import pytest
 from trading_system import desktop_launcher as launcher
 from trading_system.brokers.locking import single_writer
 from trading_system.data_sources.rss_snapshot import inspect_cache
+from trading_system.tk_startup import create_window
 
 
 def test_research_result_is_specific_fresh_and_never_claims_running(tmp_path):
@@ -185,6 +186,13 @@ def research_view(tmp_path, mode):
     view.settings = settings()
     view.mode = Mock()
     view.mode.get.return_value = mode
+    view.vendor_executor = Mock()
+    done = Future()
+    done.set_result(None)
+    view.vendor_executor.submit.return_value = done
+    view.vendor_tasks = {}
+    view.start_notes = {}
+    view.requested = {}
     view.children = {}
     view.stopping = set()
     view.message = Mock()
@@ -207,14 +215,13 @@ def test_both_research_reports_each_selected_result(tmp_path, monkeypatch, state
         spawn.side_effect = [OSError("fixture"), Mock()]
     monkeypatch.setattr(launcher.subprocess, "Popen", spawn)
     view.start_research()
-    message = view.message.set.call_args.args[0]
-    assert all(launcher.NAMES[k] in message for k in launcher.RESEARCH.values())
+    message = " ".join(view.start_notes.values())
     if state == "rakuten_spawn_failed":
         assert set(view.children) == {"kabu_panel"} and "起動できません" in message
     elif state == "kabu_check_running":
         assert set(view.children) == {"panel", "mufg_esmart"} and "接続確認中" in message
     else:
-        assert set(view.children) == {"panel", "kabu_panel"} and "起動済み" in message
+        assert set(view.children) == {"panel", "kabu_panel"} and spawn.call_count == 1
 
 
 def test_launcher_buttons_use_selection_for_research_and_connection(tmp_path, monkeypatch):
@@ -226,7 +233,7 @@ def test_launcher_buttons_use_selection_for_research_and_connection(tmp_path, mo
     monkeypatch.setattr(launcher.Launcher, "start_research", study)
     monkeypatch.setattr(launcher.Launcher, "start_daily_save", daily)
     monkeypatch.setattr(launcher.Launcher, "refresh", Mock())
-    window = tk.Tk()
+    window = create_window(tk)
     window.withdraw()
     try:
         view = launcher.Launcher(window, tmp_path)
@@ -384,8 +391,13 @@ def test_kabu_station_wait_has_separate_status_from_password_prompt(tmp_path):
     view.refresh_daily_save = Mock()
     folder = launcher.collector_root(tmp_path, "kabu_panel")
     folder.mkdir(parents=True)
-    for state, message in [("waiting_for_station", "API待ち"), ("prompt", "APIパスワード")]:
-        (folder / "status.json").write_text(json.dumps({"state": state}))
+    for state, message in [
+        ("waiting_for_station", "API待ち"),
+        ("prompt", "APIパスワード"),
+    ]:
+        (folder / "status.json").write_text(
+            json.dumps({"state": state, "updated_at": datetime.now(UTC).isoformat()})
+        )
         view.refresh()
         assert message in view.status["kabu_panel"].set.call_args.args[0]
 
@@ -403,6 +415,10 @@ def test_refresh_reports_only_current_rakuten_recovery(tmp_path):
         stopping={"rakuten"},
         window=Mock(),
         refresh=Mock(),
+        refresh_research_starts=Mock(),
+        requested={},
+        vendor_tasks={},
+        start_notes={},
         refresh_daily_save=Mock(),
         busy=lambda broker: broker == "rakuten",
         status={b: Mock() for b in launcher.CAPTURES},
@@ -410,7 +426,10 @@ def test_refresh_reports_only_current_rakuten_recovery(tmp_path):
     )
     for started, expected in [
         ("2026-11-01T10:00:00+09:00", "保存完了を待っています"),
-        ("2026-11-02T09:00:01+09:00", "停止要求済み / 過去データを復元中（1,250 / 9,399 組）"),
+        (
+            "2026-11-02T09:00:01+09:00",
+            "停止要求済み / 過去データを復元中（1,250 / 9,399 組）",
+        ),
     ]:
         (root / "status.json").write_text(json.dumps(dict(report, started_at=started)))
         launcher.Launcher.refresh(view)
@@ -460,7 +479,13 @@ def test_stop_all_attempts_each_broker_on_independent_write_errors(tmp_path, mon
     showerror = Mock()
     monkeypatch.setattr(launcher, "request_stop", publish)
     monkeypatch.setattr("tkinter.messagebox.showerror", showerror)
-    view = SimpleNamespace(project=tmp_path, stopping=set(), message=Mock())
+    view = SimpleNamespace(
+        project=tmp_path,
+        stopping=set(),
+        message=Mock(),
+        vendor_tasks={},
+        start_notes={},
+    )
     launcher.Launcher.stop_all(view)
     assert calls == list(launcher.CAPTURES)
     assert view.stopping == set(launcher.CAPTURES) - set(failed)

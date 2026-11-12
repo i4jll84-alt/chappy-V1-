@@ -8,7 +8,11 @@ import pytest
 from test_research_panel import CODES, T
 
 from trading_system import kabu_study
-from trading_system.brokers.mufg_esmart.connection_check import BASE, ProbeError, ReadOnlyTransport
+from trading_system.brokers.mufg_esmart.connection_check import (
+    BASE,
+    ProbeError,
+    ReadOnlyTransport,
+)
 from trading_system.brokers.mufg_esmart.market_data import Client
 
 
@@ -89,7 +93,9 @@ def test_one_pass_records_31_evening_boards_shared_token_and_retries_once(tmp_pa
             "SELECT raw_board_gzip FROM samples WHERE raw_board_gzip IS NOT NULL"
         ):
             assert b"stub-token-alone" not in gzip.decompress(blob)
-    assert json.loads((root / "status.json").read_bytes())["symbols_with_book"] == 31
+    saved = json.loads((root / "status.json").read_bytes())
+    assert saved["symbols_with_book"] == saved["current_day_board_symbols"] == 31
+    assert saved["last_board_at"] == now.isoformat()
 
 
 def test_panel_password_wait_observes_original_close(tmp_path):

@@ -3,29 +3,12 @@
 import argparse
 import json
 from pathlib import Path
-from time import sleep
 
 from trading_system.brokers.market_data import run
 from trading_system.brokers.models import Account
 from trading_system.brokers.mufg_esmart.market_data import Client, RecoveryProbe
 from trading_system.brokers.registry import vendor_adapter
-
-
-def _prompt_window(tk, stop_reason):
-    for attempt in range(3):
-        if stop_reason():
-            return None
-        try:
-            return tk.Tk()
-        except tk.TclError as exc:
-            if stop_reason():
-                return None
-            # Windows may briefly fail to read an installed Tcl/Tk startup script.
-            if attempt == 2 or not str(exc).startswith(
-                ("Can't find a usable init.tcl", "Can't find a usable tk.tcl")
-            ):
-                raise
-            sleep(0.05)
+from trading_system.tk_startup import create_window
 
 
 def password_prompt(stop_reason, target="7203の株価・板", *, one_pass=False):
@@ -33,7 +16,7 @@ def password_prompt(stop_reason, target="7203の株価・板", *, one_pass=False
     import tkinter as tk
     from tkinter import ttk
 
-    window = _prompt_window(tk, stop_reason)
+    window = create_window(tk, stop_reason)
     if window is None:
         return None
     window.withdraw()
