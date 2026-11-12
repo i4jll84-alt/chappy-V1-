@@ -201,11 +201,11 @@ def run(
             return
         try:
             with single_writer(shared):
+                from trading_system.research.daytrade_universe import panel_location
+
+                panel = panel_location(project / "data/rss-panel", requested_day.date())
                 symbols = [
-                    s[:-2]
-                    for s in panel_symbols(
-                        json.loads((project / "data/rss-panel/panel.json").read_bytes())
-                    )
+                    s[:-2] for s in panel_symbols(json.loads((panel / "panel.json").read_bytes()))
                 ]
                 reason = wait_for_listener(0)
                 if reason:
@@ -320,6 +320,7 @@ def run(
                     client.close()
         except Exception as exc:
             reasons = {
+                "daily_panel_missing": "daily_panel_missing",
                 "broker_state_already_open": "collector_already_active",
                 "api_password_format_invalid": "api_password_format_invalid",
             }

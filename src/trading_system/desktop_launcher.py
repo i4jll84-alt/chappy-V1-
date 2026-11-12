@@ -130,6 +130,15 @@ def save_market_day(project, day):
     return collect(day, market_day_settings(project))
 
 
+def panel_status(report):
+    panel = report.get("next_panel", {})
+    if panel.get("state") == "ready":
+        return f" ／ {panel['target_session']} 用候補30銘柄＋トヨタを保存"
+    if panel.get("state") == "failed":
+        return " ／ 翌営業日候補の作成失敗。「当日分を保存」で再試行してください。"
+    return ""
+
+
 def rakuten_progress(project, requested_ns):
     """Only display a report from the current launch, never yesterday's status."""
     try:
@@ -458,7 +467,10 @@ class Launcher:
             if report["state"] == "closed_day":
                 message = f"{report['date']} は休場日です。"
             elif report["state"] == "complete":
-                message = f"{report['date']} 保存完了（日足 {report['daily_rows']:,} 銘柄）"
+                message = (
+                    f"{report['date']} 保存完了（日足 {report['daily_rows']:,} 銘柄）"
+                    + panel_status(report)
+                )
             else:
                 message = "保存を確認できません。時間をおいて再実行してください。"
         except Exception as exc:
@@ -494,7 +506,10 @@ class Launcher:
                     saved = json.loads(path.read_bytes())
                     if saved["state"] != "complete" or saved["date"] != today.isoformat():
                         raise ValueError("unexpected_daily_report")
-                    message = f"停止中 ／ 本日の保存記録あり（日足 {saved['daily_rows']:,} 銘柄）"
+                    message = (
+                        f"停止中 ／ 本日の保存記録あり（日足 {saved['daily_rows']:,} 銘柄）"
+                        + panel_status(saved)
+                    )
             self.daily_seen = observation
         except (OSError, ValueError, KeyError, TypeError):
             self.daily_seen = None

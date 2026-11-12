@@ -122,6 +122,8 @@ def active_status(broker, data, now):
 
 
 def terminal_guidance(state, reason):
+    if reason == "daily_panel_missing":
+        return "本日用の候補がありません。前営業日の日足と候補の保存結果を確認してください。"
     if reason == "stop_or_cutoff":
         return "開始前に停止または受付終了。次の取得時間に開始してください。"
     if reason == "collector_already_active":

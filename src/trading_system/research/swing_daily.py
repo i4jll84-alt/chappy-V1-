@@ -179,6 +179,34 @@ def collect(day, settings, refresh=False):
         atomic_write(
             root / "daily-snapshots" / iso / "last_collection.json", canonical(report).encode()
         )
+        from trading_system.research.daytrade_universe import prepare
+
+        panel_root = root.parent / "rss-panel"
+        policy = panel_root.parent.parent / "config/daytrade-universe.json"
+        if policy.is_file() and day >= date.fromisoformat(
+            json.loads(policy.read_bytes())["first_decision"]
+        ):
+            try:
+                path = prepare(root, panel_root, day)
+                report["next_panel"] = {"state": "ready", "target_session": path.name}
+            except Exception as exc:
+                report["next_panel"] = {"state": "failed", "error_type": type(exc).__name__}
+                if isinstance(exc, ValueError) and str(exc) in {
+                    "incomplete_exchange_calendar",
+                    "insufficient_daily_candidates",
+                    "panel_deadline_passed",
+                    "daily_hash_mismatch",
+                    "unverified_daily_prices",
+                    "invalid_panel_configuration",
+                    "master_price_coverage_mismatch",
+                    "calendar_archive_busy",
+                    "prices_not_yet_available",
+                    "invalid_day_receipt",
+                }:
+                    report["next_panel"]["reason"] = str(exc)
+            atomic_write(
+                root / "daily-snapshots" / iso / "last_collection.json", canonical(report).encode()
+            )
     return report
 
 
@@ -186,14 +214,25 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--date", type=date.fromisoformat, default=datetime.now(JST).date())
     p.add_argument("--refresh", action="store_true")
+    p.add_argument(
+        "--latest-closed-session",
+        action="store_true",
+        help="Scheduled evening collection, including a missed run before the next open.",
+    )
     args = p.parse_args()
     try:
-        result = collect(args.date, Settings.load(), args.refresh)
+        settings = Settings.load()
+        day = args.date
+        if args.latest_closed_session:
+            from trading_system.research.daytrade_universe import latest_closed_session
+
+            day = latest_closed_session(settings.data_root.resolve(), datetime.now(JST))
+        result = collect(day, settings, args.refresh)
         print(json.dumps(result, ensure_ascii=False))
     except Exception as exc:
         print(json.dumps({"state": "failed", "error_type": type(exc).__name__}))
         return 2
-    return 0
+    return 2 if result.get("next_panel", {}).get("state") == "failed" else 0
 
 
 if __name__ == "__main__":

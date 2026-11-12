@@ -43,12 +43,18 @@ def configuration(root):
         symbols = panel_symbols(config)
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise ValueError("invalid_panel_configuration") from exc
-    book = root / BOOK_NAME
+    session = config.get("session")
+    if session is not None and (
+        date.fromisoformat(session).isoformat() != session or root.name != session
+    ):
+        raise ValueError("invalid_panel_configuration")
+    book = root / (f"研究用分足-{session}.xlsx" if session else BOOK_NAME)
     validate_workbook(book, symbols)
     return symbols, book
 
 
 FAILURE_MESSAGES = {
+    "daily_panel_missing": "本日用の候補がありません。前営業日の日足保存を確認してください。",
     "invalid_panel_configuration": "31銘柄の設定ファイルを確認してください。",
     "research_workbook_unreadable": "研究用Excelを読み取れません。保存先を確認してください。",
     "invalid_research_workbook": "研究用Excelのファイル形式を確認してください。",
@@ -324,7 +330,10 @@ def run(
             status(state="not_started", reason="stop_requested")
             return
         try:
-            symbols, book = configuration(root)
+            from trading_system.research.daytrade_universe import panel_location
+
+            folder = panel_location(root, start_day.date())
+            symbols, book = configuration(folder)
             if stopped() or (not one_pass and clock() >= cutoff):
                 status(state="not_started", reason="stop_or_cutoff")
                 return
