@@ -9,12 +9,17 @@ from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
 
+import httpx
+
 from trading_system.brokers.locking import single_writer
+from trading_system.data_sources.jquants import APIError
 from trading_system.research import swing_earnings as earnings
 from trading_system.research import swing_macro as macro
+from trading_system.research import swing_shorts as shorts
 from trading_system.research.daytrade_universe import JST, calendar_days, dated_inputs
 from trading_system.research.swing_credit import capture, read_credit
 from trading_system.research.swing_rule_review import save_review
+from trading_system.research.swing_short_sources import capture_margin, capture_public
 from trading_system.research.swing_windows import history_rows
 from trading_system.storage.store import atomic_write, canonical
 
@@ -220,6 +225,7 @@ def screen(project, day, asof):
         credit_complete=len(credit) == 2,
         universe_exclusions=excluded,
         candidates=rows,
+        short_charts=shorts.chart_rows(history, master, window),
     )
 
 
@@ -279,6 +285,14 @@ def morning(project, root, day, sessions, now):
     macro_cutoff = datetime.now(JST)
     market = macro.asof(root, macro_cutoff)
     market["decision_cutoff"] = macro_cutoff.isoformat()
+    short_packet = dict(state="missing_signal" if not stopped else "stopped", candidates=[])
+    if not stopped and signal.get("window"):
+        try:
+            short_packet = shorts.prepare(
+                project, day, signal["window"], signal["short_charts"], market, macro_cutoff
+            )
+        except (OSError, ValueError, KeyError, sqlite3.Error) as exc:
+            short_packet = dict(state="input_error", issue=type(exc).__name__, candidates=[])
     orders = {}
     for key in ACCOUNTS[:2]:
         eligible = [r for r in raw if not r["plus3_exclusions"]] if key.endswith("plus3") else raw
@@ -296,6 +310,7 @@ def morning(project, root, day, sessions, now):
         machine=orders,
         earnings={"evidence": evidence, "annotations": annotations},
         market_context=market,
+        short_research=short_packet,
     )
     # Keep the reviewer's input separate from the mechanical decisions.
     review = dict(
@@ -307,6 +322,7 @@ def morning(project, root, day, sessions, now):
         credit_refs=signal.get("credit_refs", []),
         earnings_source=evidence,
         market_context=market,
+        short_research=short_packet,
         input_refs=signal.get("input_refs", []),
         accounts={k: accounts[k] for k in ACCOUNTS[2:]},
         input_sha256=signature(bundle),
@@ -421,6 +437,7 @@ def record_agent(root, day, answer):
             differences=diffs,
             earnings_issues=earnings_issues,
             market_issues=market_issues,
+            short_review=shorts.review(pre, answer.get("short_review")),
         ),
     )
     return "frozen"
@@ -678,7 +695,24 @@ def run(project, action, answer=None):
                 schedule = earnings.capture(root)
             except Exception as exc:
                 schedule = dict(state="needs_review", reason=str(exc))
-            result = dict(state="evening", settled=settled, credit=credit, earnings=schedule)
+            try:
+                short_public = capture_public(project, day)
+            except (httpx.HTTPError, ValueError, OSError, sqlite3.Error) as exc:
+                short_public = "needs_review:" + type(exc).__name__
+            margins = {}
+            for publication in sessions[i - 1 : i + 1]:
+                try:
+                    margins[publication] = capture_margin(project, publication)
+                except (ValueError, OSError, APIError) as exc:
+                    margins[publication] = "needs_review:" + str(exc)
+            result = dict(
+                state="evening",
+                settled=settled,
+                credit=credit,
+                earnings=schedule,
+                short_margin=margins,
+                short_public=short_public,
+            )
             if (root / "sessions" / day / "close.json").exists():
                 report = save_review(root, day)
                 result["review"] = {
@@ -736,8 +770,13 @@ def main():
     result = run(Path.cwd(), args.action, args.answer)
     print(canonical(result))
     return int(
-        isinstance(result.get("settled"), dict)
+        result.get("short_public", "acquired") != "acquired"
+        or isinstance(result.get("settled"), dict)
         or result.get("earnings", {}).get("state") == "needs_review"
+        or any(
+            v not in ("acquired", "already_acquired")
+            for v in result.get("short_margin", {}).values()
+        )
         or any(str(v).startswith("needs_review:") for v in result.get("credit", {}).values())
     )
 

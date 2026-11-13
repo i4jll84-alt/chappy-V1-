@@ -23,6 +23,7 @@ class JQuantsClient:
     URL = "https://api.jquants.com/v2/equities/bars/daily"
     ENDPOINTS = {
         "prices": URL,
+        "margin_interest": "https://api.jquants.com/v2/markets/margin-interest",
         "topix": "https://api.jquants.com/v2/indices/bars/daily/topix",
         "financials": "https://api.jquants.com/v2/fins/summary",
         "master": "https://api.jquants.com/v2/equities/master",
