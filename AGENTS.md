@@ -18,6 +18,10 @@
   GPT-6.1 Sol Medium〜Highを推奨。実際に指定・確認できたモデルのみ記録する。
 - 検証: .venv/Scripts/python.exe -m pytest、ruff check .、ruff format --check .
 
+## ペーパー取引判断のサブエージェント
+
+ユーザーが trade_decision を名指ししたら、.codex/agents/trade_decision.toml の定義を使ってサブエージェントに委任する。カスタム役割を指定できるクライアントでは登録名 trade_decision を指定する。spawn_agent が task_name・model・reasoning_effort を受け取り、役割引数を持たない場合は、定義の name・model・model_reasoning_effort を対応させ、fork_turns=none で起動する。子にはプロジェクトの作業場所、当該TOMLの developer_instructions と AGENTS.md を最初に読む指示、ユーザー指定の判断時刻・資金・仮想建玉・依頼を渡す。結果を待って報告する。子は再委任しない。モデルや委任機能が利用できなければ、その事実を報告する。
+
 ## GitHubへの同期（2026-10-27のユーザー指示）
 
 - 今後、このプロジェクトのコード・仕様・設定・進捗・引き継ぎ情報を変更した場合は、
