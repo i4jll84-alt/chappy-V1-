@@ -85,6 +85,10 @@ def test_publication_deadline_repeat_and_settlement(tmp_path, monkeypatch):
         input_sha256=packet["input_sha256"],
         groups={"current": group, "plus3": dict(group, buy=["12340"])},
     )
+    answer["groups"]["plus3"]["earnings_review"] = {
+        "12340": {"state": "unavailable", "dates": [], "manifest_sha256": None}
+    }
+    answer["groups"]["plus3"]["earnings_review"]["12340"]["state"] = "not_listed"
     Clock.h = 9
     with pytest.raises(ValueError, match="missed_agent_deadline"):
         sf.record_agent(root, day, answer)
@@ -94,6 +98,7 @@ def test_publication_deadline_repeat_and_settlement(tmp_path, monkeypatch):
     assert sf.record_agent(root, day, answer) == "already_frozen"
     assert not sf.read(folder / "agent.json")["differences"]["current"]["buy"]["same_order"]
     rejected = sf.read(folder / "agent.json")
+    assert rejected["earnings_issues"]["plus3"]["12340"] == "unsubstantiated_earnings_state"
     assert rejected["answer"]["groups"]["plus3"]["buy"] == ["12340"]
     assert rejected["executable"]["plus3"]["buy"] == []
     monkeypatch.setattr(sf, "dated_inputs", lambda *args: ({"12340": [row()]}, {}, []))

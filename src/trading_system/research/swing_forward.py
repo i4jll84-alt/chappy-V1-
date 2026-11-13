@@ -10,6 +10,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from trading_system.brokers.locking import single_writer
+from trading_system.research import swing_earnings as earnings
 from trading_system.research.daytrade_universe import JST, calendar_days, dated_inputs
 from trading_system.research.swing_credit import capture, read_credit
 from trading_system.research.swing_rule_review import save_review
@@ -267,6 +268,13 @@ def morning(project, root, day, sessions, now):
         )
     stopped = (root / "STOP").exists()
     raw = signal["candidates"]
+    evidence, events = earnings.asof(root, cutoff)
+    annotations = {
+        r["code"]: earnings.classify(
+            events.get(r["code"]), evidence["state"] == "verified", day, sessions[i + 6]
+        )
+        for r in raw
+    }
     orders = {}
     for key in ACCOUNTS[:2]:
         eligible = [r for r in raw if not r["plus3_exclusions"]] if key.endswith("plus3") else raw
@@ -282,6 +290,7 @@ def morning(project, root, day, sessions, now):
         signal=signal,
         accounts_before=accounts,
         machine=orders,
+        earnings={"evidence": evidence, "annotations": annotations},
     )
     # Keep the reviewer's input separate from the mechanical decisions.
     review = dict(
@@ -291,6 +300,7 @@ def morning(project, root, day, sessions, now):
         stopped=stopped,
         exit_if_bought=bundle["exit_if_bought"],
         credit_refs=signal.get("credit_refs", []),
+        earnings_source=evidence,
         input_refs=signal.get("input_refs", []),
         accounts={k: accounts[k] for k in ACCOUNTS[2:]},
         input_sha256=signature(bundle),
@@ -317,6 +327,7 @@ def record_agent(root, day, answer):
     codes = {r["code"]: r for r in pre["signal"]["candidates"]}
     diffs = {}
     executable = {}
+    earnings_issues = {}
     for arm, g in answer["groups"].items():
         buys, sells = g["buy"], g["sell"]
         state = pre["accounts_before"]["agent_" + arm]
@@ -337,6 +348,31 @@ def record_agent(root, day, answer):
             raise ValueError("invalid_agent_codes")
         if set(buys + sells) - g["candidate_notes"].keys():
             raise ValueError("missing_trade_reason")
+        if "earnings" in pre:
+            ratings = g.get("earnings_review", {})
+            expected = pre["earnings"]["annotations"]
+            evidence = pre["earnings"]["evidence"]
+            if not isinstance(ratings, dict):
+                ratings = {}
+            issues = {c: "missing_agent_earnings_review" for c in buys if c not in ratings}
+            for code, rating in ratings.items():
+                if (
+                    code not in expected
+                    or not isinstance(rating, dict)
+                    or rating.get("state") != expected[code]["state"]
+                ):
+                    issues[code] = "unsubstantiated_earnings_state"
+                elif rating.get("manifest_sha256") != evidence.get("manifest_sha256"):
+                    issues[code] = "unsubstantiated_earnings_source"
+                else:
+                    dates = rating.get("dates")
+                    if (
+                        not isinstance(dates, list)
+                        or not all(isinstance(d, str) for d in dates)
+                        or sorted(dates) != sorted({d for d, _ in expected[code]["events"] if d})
+                    ):
+                        issues[code] = "unsubstantiated_earnings_date"
+            earnings_issues[arm] = issues
         blocked = pre["stopped"] or (root / "STOP").exists() or state["status"] != "ok"
         eligible = [
             r["code"] for r in codes.values() if arm == "current" or not r["plus3_exclusions"]
@@ -368,7 +404,11 @@ def record_agent(root, day, answer):
     write(
         target,
         dict(
-            recorded_at=stamp.isoformat(), answer=answer, executable=executable, differences=diffs
+            recorded_at=stamp.isoformat(),
+            answer=answer,
+            executable=executable,
+            differences=diffs,
+            earnings_issues=earnings_issues,
         ),
     )
     return "frozen"
@@ -503,6 +543,38 @@ def closing(project, root, day, sessions, now):
         diffs[engine + "_rules"] = dict(
             plus3_minus_current=str(Decimal(b["net"]) - Decimal(a["net"])) if a and b else None
         )
+    alternatives = {}
+    prior = root / "sessions" / sessions[i - 1] / "close.json"
+    previous_alt = read(prior).get("earnings_counterfactual", {}) if prior.exists() else {}
+    for key in ACCOUNTS[:2]:
+        if key in previous_alt:
+            book = previous_alt[key]["account"]
+        elif day == START:
+            book = initial()[key]
+        else:
+            continue  # A missing historic shadow ledger cannot be recreated with today's cash.
+        if pre and "earnings" in pre:
+            arm = key.split("_")[1]
+            eligible = [
+                r
+                for r in pre["signal"]["candidates"]
+                if arm == "current" or not r["plus3_exclusions"]
+            ][:5]
+            omitted = [
+                r["code"]
+                for r in eligible
+                if pre["earnings"]["annotations"][r["code"]]["state"] == "during_hold"
+            ]
+            orders = account_orders(
+                book, [r for r in eligible if r["code"] not in omitted], day, not pre["stopped"]
+            )
+        else:
+            omitted = []
+            orders = {"buy": [], "sell": [], "skips": {}}
+        shadow, executions, performance = settle_account(book, orders, quotes, day, sessions[i + 6])
+        alternatives[key] = dict(
+            account=shadow, fills=executions, metrics=performance, omitted=omitted, orders=orders
+        )
     write(
         folder / "close.json",
         dict(
@@ -513,6 +585,7 @@ def closing(project, root, day, sessions, now):
             fills=fills,
             metrics=metrics,
             comparison=diffs,
+            earnings_counterfactual=alternatives,
             sources=sources,
         ),
     )
@@ -528,6 +601,8 @@ def run(project, action, answer=None):
             write(root / "initial.json", dict(start=START, accounts=initial()))
         if action == "init":
             return {"state": "initialized", "start": START}
+        if action == "earnings":
+            return earnings.capture(root)
         if action == "review":
             closes = sorted((root / "sessions").glob("*/close.json"))
             return save_review(root, closes[-1].parent.name if closes else day)
@@ -550,7 +625,11 @@ def run(project, action, answer=None):
                         credit[d] = capture(project, d)
                     except Exception as exc:
                         credit[d] = f"needs_review:{type(exc).__name__}:{exc}"
-            result = dict(state="evening", settled=settled, credit=credit)
+            try:
+                schedule = earnings.capture(root)
+            except Exception as exc:
+                schedule = dict(state="needs_review", reason=str(exc))
+            result = dict(state="evening", settled=settled, credit=credit, earnings=schedule)
             if (root / "sessions" / day / "close.json").exists():
                 report = save_review(root, day)
                 result["review"] = {
@@ -594,13 +673,16 @@ def catch_up(project, root, last, now):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("action", choices=["init", "morning", "record-agent", "evening", "review"])
+    p.add_argument(
+        "action", choices=["init", "morning", "record-agent", "evening", "review", "earnings"]
+    )
     p.add_argument("--answer", type=Path)
     args = p.parse_args()
     result = run(Path.cwd(), args.action, args.answer)
     print(canonical(result))
     return int(
         isinstance(result.get("settled"), dict)
+        or result.get("earnings", {}).get("state") == "needs_review"
         or any(str(v).startswith("needs_review:") for v in result.get("credit", {}).values())
     )
 

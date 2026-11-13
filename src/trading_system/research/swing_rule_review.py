@@ -6,6 +6,7 @@ from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
+from trading_system.research.swing_earnings_review import EarningsReview
 from trading_system.storage.store import atomic_write, canonical
 
 
@@ -16,6 +17,7 @@ def summarize(root: Path, through: str):
     engines = ("machine", "agent")
     rules = ("current", "plus3")
     books = initial["accounts"]
+    earnings = EarningsReview(books)
     fills = {key: Counter() for key in books}
     coverage = {key: Counter() for key in books}
     lots = {key: {} for key in books}
@@ -32,6 +34,9 @@ def summarize(root: Path, through: str):
             raise ValueError("review_target_mismatch")
         prefile = file.parent / "preopen.json"
         pre = json.loads(prefile.read_bytes()) if prefile.is_file() else None
+        agentfile = file.parent / "agent.json"
+        agent = json.loads(agentfile.read_bytes()) if agentfile.is_file() else None
+        earnings.update(close, pre, agent)
         if pre and pre["target"] != day:
             raise ValueError("review_preopen_mismatch")
         for engine in engines:
@@ -113,6 +118,7 @@ def summarize(root: Path, through: str):
         settled_sessions=days,
         accounts=accounts,
         matched_credit=matched,
+        earnings_review=earnings.report(),
     )
 
 
