@@ -38,6 +38,7 @@ class JQuantsClient:
         sleep: Callable[[float], None] = time.sleep,
         on_attempt: Callable[..., None] | None = None,
         endpoint: str = "prices",
+        transport_retry_delays: tuple[float, ...] = (1, 2, 4),
     ):
         if not isinstance(api_key, str) or not api_key.strip():
             raise ValueError("A nonempty API key is required")
@@ -46,6 +47,7 @@ class JQuantsClient:
         if endpoint not in self.ENDPOINTS:
             raise ValueError("Unsupported J-Quants endpoint")
         self.endpoint = endpoint
+        self._transport_retry_delays = transport_retry_delays
         self._url = self.ENDPOINTS[endpoint]
         self._interval = 1.0 if endpoint == "financials" else 60 / self.LIMITS[plan]
         self._sleep = sleep
@@ -85,7 +87,7 @@ class JQuantsClient:
     def get_page(self, params: dict[str, str]) -> dict:
         self.last_response_bytes = None
         # Every network attempt, including retries, participates in rate limiting.
-        for attempt in range(4):
+        for attempt in range(max(4, len(self._transport_retry_delays) + 1)):
             if self._last_attempt is not None:
                 self._wait(max(0, self._interval - (time.monotonic() - self._last_attempt)))
             self._last_attempt = time.monotonic()
@@ -93,16 +95,16 @@ class JQuantsClient:
                 response = self._client.get(self._url, params=params)
             except httpx.TransportError:
                 self._record(None, "transport_error")
-                if attempt == 3:
+                if attempt >= len(self._transport_retry_delays):
                     raise APIError("transport_error") from None
-                self._wait(2**attempt)
+                self._wait(self._transport_retry_delays[attempt])
                 continue
 
             status = response.status_code
             if status == 429 or 500 <= status <= 599:
                 category = "rate_limited" if status == 429 else "server_error"
                 self._record(status, category)
-                if attempt == 3:
+                if attempt >= 3:
                     raise APIError(category, status)
                 delay = 120.0 if status == 429 else float(2**attempt)
                 if status == 429:

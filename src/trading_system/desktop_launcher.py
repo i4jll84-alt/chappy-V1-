@@ -10,6 +10,7 @@ from time import time_ns
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
+from trading_system.data_sources.jquants import APIError
 from trading_system.research_status import active_status, terminal_guidance
 from trading_system.rss_stop import publish_stop, stop_ticket
 from trading_system.tk_startup import create_window
@@ -458,7 +459,9 @@ class Launcher:
         except RuntimeError:
             self.daily_status.set("保存を開始できません。画面を開き直してください。")
             return
-        self.daily_status.set(f"{now:%m/%d} の日足・決算などを保存中です。")
+        self.daily_status.set(
+            f"{now:%m/%d} の日足・決算などを保存中です。通信が途切れた場合は自動再試行します。"
+        )
 
     def refresh_daily_save(self):
         if self.daily_task is None:
@@ -484,7 +487,19 @@ class Launcher:
                 "broker_state_already_open": "別の保存処理が実行中です。完了をお待ちください。",
                 "daily_not_yet_available": "日足が未配信です。時間をおいて再実行してください。",
             }
-            message = reasons.get(str(exc), "保存に失敗しました。通信と設定を確認してください。")
+            if isinstance(exc, APIError):
+                api_reasons = {
+                    "transport_error": "ネットワーク接続の復旧後に「当日分を保存」を再実行。",
+                    "authentication_failed": "J-Quantsの認証失敗。APIキーを確認してください。",
+                    "access_denied": "J-Quantsのアクセス拒否。利用権限を確認してください。",
+                    "rate_limited": "J-Quantsの回数制限です。時間をおいて再実行してください。",
+                    "server_error": "J-Quants側の障害です。時間をおいて再実行してください。",
+                }
+                message = api_reasons.get(exc.category, "J-Quantsの応答を確認できませんでした。")
+            else:
+                message = reasons.get(
+                    str(exc), "保存に失敗しました。通信と設定を確認してください。"
+                )
         self.daily_task = None
         self.daily_status.set(message)
 

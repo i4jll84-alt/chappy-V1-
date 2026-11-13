@@ -129,6 +129,23 @@ def test_timeout_retries_and_sanitizes():
     assert "secret-key" not in str(caught.value)
 
 
+def test_daily_client_recovers_after_wifi_reconnect():
+    from trading_system.research.swing_daily import DAILY_TRANSPORT_DELAYS
+
+    attempts = []
+    waits = []
+
+    def handler(request):
+        attempts.append(request)
+        if len(attempts) <= len(DAILY_TRANSPORT_DELAYS):
+            raise httpx.ConnectError("offline", request=request)
+        return httpx.Response(200, json={"data": []})
+
+    with client(handler, sleep=waits.append, transport_retry_delays=DAILY_TRANSPORT_DELAYS) as api:
+        assert api.get_page({}) == {"data": []}
+    assert len(attempts) == 7 and sum(waits) >= 82
+
+
 @pytest.mark.parametrize(
     "body", [[], {}, {"data": {}}, {"data": [1]}, {"data": [], "pagination_key": 1}]
 )

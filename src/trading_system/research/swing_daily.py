@@ -5,11 +5,12 @@ import hashlib
 import json
 from collections import Counter
 from datetime import UTC, date, datetime, time, timedelta
+from time import sleep
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from trading_system.brokers.locking import single_writer
-from trading_system.data_sources.jquants import JQuantsClient
+from trading_system.data_sources.jquants import APIError, JQuantsClient
 from trading_system.market_financial import ingest_market_financial
 from trading_system.reference import ingest_reference
 from trading_system.settings import Settings, api_key
@@ -17,6 +18,18 @@ from trading_system.storage.store import atomic_write, canonical
 from trading_system.validation.prices import validate_price
 
 JST = ZoneInfo("Asia/Tokyo")
+DAILY_TRANSPORT_DELAYS = (1, 2, 4, 15, 30, 30)
+
+
+def wait_for_daily_pages(path):
+    """A verified page is usable one second after observation, even on fast disks."""
+    pages = json.loads(path.read_bytes())["pages"]
+    available = max(datetime.fromisoformat(p["available_at"]) for p in pages)
+    delay = (available - datetime.now(UTC)).total_seconds()
+    if delay > 1:
+        raise ValueError("prices_not_yet_available")
+    if delay > 0:
+        sleep(delay)
 
 
 def verify_pages(folder, manifest, day, expected_codes=None):
@@ -129,7 +142,10 @@ def collect(day, settings, refresh=False):
         for kind, params in args.items():
             ingest = ingest_reference if kind in ("calendar", "master") else ingest_market_financial
             with JQuantsClient(
-                secret.get_secret_value(), plan=settings.plan, endpoint=kind
+                secret.get_secret_value(),
+                plan=settings.plan,
+                endpoint=kind,
+                transport_retry_delays=DAILY_TRANSPORT_DELAYS,
             ) as client:
                 result = ingest(root, client, kind, params, settings.plan, refresh)
                 if not refresh and result.get("state") == "empty" and kind != "financials":
@@ -166,7 +182,11 @@ def collect(day, settings, refresh=False):
                     raise ValueError("calendar_count")
                 elif records[0]["HolDiv"] not in ("1", "2"):
                     return {**report, "state": "closed_day"}
-        with JQuantsClient(secret.get_secret_value(), plan=settings.plan) as client:
+        with JQuantsClient(
+            secret.get_secret_value(),
+            plan=settings.plan,
+            transport_retry_delays=DAILY_TRANSPORT_DELAYS,
+        ) as client:
             path, count = snapshot(root, iso, client, refresh, expected_codes=codes)
         if not count:
             raise ValueError("daily_not_yet_available")
@@ -176,9 +196,15 @@ def collect(day, settings, refresh=False):
             daily_manifest=str(path),
             completed_at=datetime.now(UTC).isoformat(),
         )
-        atomic_write(
-            root / "daily-snapshots" / iso / "last_collection.json", canonical(report).encode()
-        )
+        receipt = root / "daily-snapshots" / iso / "last_collection.json"
+        if receipt.exists():
+            old = json.loads(receipt.read_bytes())
+            if all(
+                old.get(k) == report[k]
+                for k in ("date", "state", "jobs", "daily_manifest", "daily_rows")
+            ):
+                report["completed_at"] = old["completed_at"]
+        atomic_write(receipt, canonical(report).encode())
         from trading_system.research.daytrade_universe import prepare
 
         panel_root = root.parent / "rss-panel"
@@ -187,6 +213,7 @@ def collect(day, settings, refresh=False):
             json.loads(policy.read_bytes())["first_decision"]
         ):
             try:
+                wait_for_daily_pages(path)
                 path = prepare(root, panel_root, day)
                 report["next_panel"] = {"state": "ready", "target_session": path.name}
             except Exception as exc:
@@ -229,6 +256,18 @@ def main():
             day = latest_closed_session(settings.data_root.resolve(), datetime.now(JST))
         result = collect(day, settings, args.refresh)
         print(json.dumps(result, ensure_ascii=False))
+    except APIError as exc:
+        print(
+            json.dumps(
+                {
+                    "state": "failed",
+                    "error_type": "APIError",
+                    "reason": exc.category,
+                    "http_status": exc.status_code,
+                }
+            )
+        )
+        return 2
     except Exception as exc:
         print(json.dumps({"state": "failed", "error_type": type(exc).__name__}))
         return 2

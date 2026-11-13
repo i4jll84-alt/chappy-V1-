@@ -322,6 +322,8 @@ def test_daily_save_launch_time_double_click_and_close(tmp_path, monkeypatch):
     [
         ({"state": "closed_day", "date": "2026-11-03"}, "休場日"),
         (ValueError("daily_not_yet_available"), "未配信"),
+        (launcher.APIError("transport_error"), "ネットワーク接続"),
+        (launcher.APIError("authentication_failed", 401), "認証"),
         (ValueError("broker_state_already_open"), "別の保存処理"),
         (RuntimeError("private fixture details"), "保存に失敗"),
     ],
