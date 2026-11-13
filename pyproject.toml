@@ -7,7 +7,7 @@ name = "japan-stock-trading"
 version = "0.1.0"
 description = "Auditable J-Quants V2 data foundation (stage 1 only)"
 requires-python = ">=3.12"
-dependencies = ["httpx>=0.28,<0.29", "pandas>=2.2,<3", "numpy>=2,<3", "duckdb>=1.4,<2", "pyarrow>=19,<24", "pydantic>=2.10,<3", "tzdata>=2025.1", "lightgbm==4.7.0", "openpyxl>=3.1.5,<4"]
+dependencies = ["pypdf==6.21.4", "httpx>=0.28,<0.29", "pandas>=2.2,<3", "numpy>=2,<3", "duckdb>=1.4,<2", "pyarrow>=19,<24", "pydantic>=2.10,<3", "tzdata>=2025.1", "lightgbm==4.7.0", "openpyxl>=3.1.5,<4"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<10", "ruff>=0.11,<1"]

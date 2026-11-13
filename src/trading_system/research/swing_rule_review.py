@@ -23,6 +23,11 @@ def summarize(root: Path, through: str):
     lots = {key: {} for key in books}
     cohorts = {engine: {} for engine in engines}
     latest_metrics = dict.fromkeys(books)
+    market = {
+        k: dict(assessed=0, missing=0, deferred=0, net_difference_yen=None)
+        for k in books
+        if k.startswith("agent_")
+    }
     last_session = None
     days = 0
     for file in sorted((root / "sessions").glob("*/close.json")):
@@ -37,6 +42,21 @@ def summarize(root: Path, through: str):
         agentfile = file.parent / "agent.json"
         agent = json.loads(agentfile.read_bytes()) if agentfile.is_file() else None
         earnings.update(close, pre, agent)
+        for key, totals in market.items():
+            overlay = close.get("macro_counterfactual", {}).get(key, {})
+            assessment_ok = bool(
+                overlay
+                and not overlay.get("issue")
+                and close["coverage"][key] == "recorded"
+                and (overlay.get("metrics") is not None)
+                and any(
+                    v["state"] == "usable"
+                    for v in (pre or {}).get("market_context", {}).get("series", {}).values()
+                )
+            )
+            totals["assessed" if assessment_ok else "missing"] += 1
+            totals["deferred"] += len(overlay.get("deferred", {}))
+            totals["net_difference_yen"] = overlay.get("net_difference_yen")
         if pre and pre["target"] != day:
             raise ValueError("review_preopen_mismatch")
         for engine in engines:
@@ -119,6 +139,7 @@ def summarize(root: Path, through: str):
         accounts=accounts,
         matched_credit=matched,
         earnings_review=earnings.report(),
+        market_review=market,
     )
 
 

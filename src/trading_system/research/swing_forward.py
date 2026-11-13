@@ -11,6 +11,7 @@ from pathlib import Path
 
 from trading_system.brokers.locking import single_writer
 from trading_system.research import swing_earnings as earnings
+from trading_system.research import swing_macro as macro
 from trading_system.research.daytrade_universe import JST, calendar_days, dated_inputs
 from trading_system.research.swing_credit import capture, read_credit
 from trading_system.research.swing_rule_review import save_review
@@ -275,6 +276,9 @@ def morning(project, root, day, sessions, now):
         )
         for r in raw
     }
+    macro_cutoff = datetime.now(JST)
+    market = macro.asof(root, macro_cutoff)
+    market["decision_cutoff"] = macro_cutoff.isoformat()
     orders = {}
     for key in ACCOUNTS[:2]:
         eligible = [r for r in raw if not r["plus3_exclusions"]] if key.endswith("plus3") else raw
@@ -291,6 +295,7 @@ def morning(project, root, day, sessions, now):
         accounts_before=accounts,
         machine=orders,
         earnings={"evidence": evidence, "annotations": annotations},
+        market_context=market,
     )
     # Keep the reviewer's input separate from the mechanical decisions.
     review = dict(
@@ -301,6 +306,7 @@ def morning(project, root, day, sessions, now):
         exit_if_bought=bundle["exit_if_bought"],
         credit_refs=signal.get("credit_refs", []),
         earnings_source=evidence,
+        market_context=market,
         input_refs=signal.get("input_refs", []),
         accounts={k: accounts[k] for k in ACCOUNTS[2:]},
         input_sha256=signature(bundle),
@@ -328,6 +334,7 @@ def record_agent(root, day, answer):
     diffs = {}
     executable = {}
     earnings_issues = {}
+    market_issues = {}
     for arm, g in answer["groups"].items():
         buys, sells = g["buy"], g["sell"]
         state = pre["accounts_before"]["agent_" + arm]
@@ -393,6 +400,10 @@ def record_agent(root, day, answer):
                 cash -= Decimal(codes[c]["estimated_debit"])
                 accepted["buy"].append(c)
         executable[arm] = accepted
+        if "market_context" in pre:
+            issue = macro.validate_assessment(pre["market_context"], g.get("market_review"), buys)
+            if issue:
+                market_issues[arm] = issue
         machine = pre["machine"]["machine_" + arm]
         diffs[arm] = {
             k: {"machine": machine[k], "agent": g[k], "same_order": machine[k] == g[k]}
@@ -409,6 +420,7 @@ def record_agent(root, day, answer):
             executable=executable,
             differences=diffs,
             earnings_issues=earnings_issues,
+            market_issues=market_issues,
         ),
     )
     return "frozen"
@@ -545,7 +557,8 @@ def closing(project, root, day, sessions, now):
         )
     alternatives = {}
     prior = root / "sessions" / sessions[i - 1] / "close.json"
-    previous_alt = read(prior).get("earnings_counterfactual", {}) if prior.exists() else {}
+    prior_close = read(prior) if prior.exists() else {}
+    previous_alt = prior_close.get("earnings_counterfactual", {})
     for key in ACCOUNTS[:2]:
         if key in previous_alt:
             book = previous_alt[key]["account"]
@@ -575,6 +588,39 @@ def closing(project, root, day, sessions, now):
         alternatives[key] = dict(
             account=shadow, fills=executions, metrics=performance, omitted=omitted, orders=orders
         )
+    market_comparison = {}
+    for key in ACCOUNTS[2:]:
+        arm = key.split("_")[1]
+        if key in prior_close.get("macro_counterfactual", {}):
+            book = prior_close["macro_counterfactual"][key]["account"]
+        elif day == START:
+            book = initial()[key]
+        else:
+            continue
+        assessment = (
+            (agent or {}).get("answer", {}).get("groups", {}).get(arm, {}).get("market_review")
+        )
+        issue = (agent or {}).get("market_issues", {}).get(arm)
+        if not pre or not agent or not pre.get("market_context") or not assessment:
+            issue = issue or "no_assessment"
+        defer = {} if issue else assessment["defer"]
+        original = agent["executable"][arm] if agent else {"buy": [], "sell": []}
+        orders = {
+            "buy": [c for c in original["buy"] if c not in defer and c not in book["positions"]],
+            "sell": [c for c in original["sell"] if c in book["positions"]],
+        }
+        state, trades, perf = settle_account(book, orders, quotes, day, sessions[i + 6])
+        market_comparison[key] = dict(
+            account=state,
+            fills=trades,
+            metrics=perf,
+            deferred={c: r for c, r in defer.items() if c in original["buy"]},
+            issue=issue,
+            orders=orders,
+            net_difference_yen=str(Decimal(perf["net"]) - Decimal(metrics[key]["net"]))
+            if perf and metrics[key]
+            else None,
+        )
     write(
         folder / "close.json",
         dict(
@@ -586,6 +632,7 @@ def closing(project, root, day, sessions, now):
             metrics=metrics,
             comparison=diffs,
             earnings_counterfactual=alternatives,
+            macro_counterfactual=market_comparison,
             sources=sources,
         ),
     )
@@ -603,6 +650,8 @@ def run(project, action, answer=None):
             return {"state": "initialized", "start": START}
         if action == "earnings":
             return earnings.capture(root)
+        if action == "market":
+            return macro.capture(root)
         if action == "review":
             closes = sorted((root / "sessions").glob("*/close.json"))
             return save_review(root, closes[-1].parent.name if closes else day)
@@ -643,7 +692,12 @@ def run(project, action, answer=None):
             if now.time() >= time(9):
                 return {"state": "missed_preopen"}
             catch_up(project, root, sessions[i - 1], now)
-            status = morning(project, root, day, sessions, now)
+            if (
+                not (root / "sessions" / day / "preopen.json").exists()
+                and not (root / "STOP").exists()
+            ):
+                macro.capture(root)
+            status = morning(project, root, day, sessions, datetime.now(JST))
             out = {"state": status}
             if status in ("frozen", "already_frozen"):
                 out["input_sha256"] = signature(read(root / "sessions" / day / "preopen.json"))
@@ -674,7 +728,8 @@ def catch_up(project, root, last, now):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
-        "action", choices=["init", "morning", "record-agent", "evening", "review", "earnings"]
+        "action",
+        choices=["init", "morning", "record-agent", "evening", "review", "earnings", "market"],
     )
     p.add_argument("--answer", type=Path)
     args = p.parse_args()
