@@ -14,14 +14,20 @@ const panel = JSON.parse(await fs.readFile(panelPath, "utf8"));
 const rawCodes = [panel.control, ...(panel.selected ?? panel.sample).map(row => row.code)];
 if (rawCodes.length !== 31 || new Set(rawCodes).size !== 31 ||
     !rawCodes.every(code => /^[0-9][A-Z0-9]{3}0$/.test(code))) throw Error("invalid study panel");
-const symbols = rawCodes.map(code => code.slice(0, 4) + ".T");
+const dailySymbols = rawCodes.map(code => code.slice(0, 4) + ".T");
+const paired = Array.isArray(panel.capture_symbols);
+const symbols = paired ? panel.capture_symbols : dailySymbols;
+if (paired && (symbols.length < 31 || symbols.length > 61 || new Set(symbols).size !== symbols.length ||
+    !symbols.every(s => /^[0-9][0-9A-Z]{3}\.T$/.test(s)) || !dailySymbols.every(s => symbols.includes(s)))) throw Error("invalid comparison panel");
+const last = symbols.length + 1;
+const indexHeader = last + 3;
 const quotes = ["現在日付","現在値","現在値詳細時刻","最良買気配値","最良売気配値","最良買気配数量","最良売気配数量","最良買気配詳細時刻","最良売気配詳細時刻","出来高"];
 const bars = ["日付","時刻","始値","高値","安値","終値","出来高"];
 const book = Workbook.create();
 const sheet = book.worksheets.add("気配");
 sheet.getRange("A1:K1").values = [["銘柄", ...quotes]];
-sheet.getRange("A2:A32").values = symbols.map(s => [s]);
-sheet.getRange("B2:K32").formulas = symbols.map(s => quotes.map(item => '=_xll.RssMarket("'+s+'","'+item+'")'));
+sheet.getRange(`A2:A${last}`).values = symbols.map(s => [s]);
+sheet.getRange(`B2:K${last}`).formulas = symbols.map(s => quotes.map(item => '=_xll.RssMarket("'+s+'","'+item+'")'));
 function header(range) {
   range.format.fill = "#175459";
   range.format.font.color = "#FFFFFF";
@@ -30,13 +36,14 @@ function header(range) {
 }
 header(sheet.getRange("A1:K1"));
 const indexFields=["現在日付","更新時刻","現在値"];
-sheet.getRange("A35:D35").values=[["市場指標",...indexFields]];
-sheet.getRange("A36:A37").values=[["N225"],["TOPX"]];
-sheet.getRange("B36:D37").formulas=["N225","TOPX"].map(code =>
+sheet.getRange(`A${indexHeader}:D${indexHeader}`).values=[["市場指標",...indexFields]];
+sheet.getRange(`A${indexHeader+1}:A${indexHeader+2}`).values=[["N225"],["TOPX"]];
+sheet.getRange(`B${indexHeader+1}:D${indexHeader+2}`).formulas=["N225","TOPX"].map(code =>
   indexFields.map(field=>'=_xll.RssIndexMarket("'+code+'","'+field+'")'));
-header(sheet.getRange("A35:D35"));
-for (const symbol of symbols) {
-  const ws = book.worksheets.add(symbol);
+header(sheet.getRange(`A${indexHeader}:D${indexHeader}`));
+const slots = paired && symbols.length > 50 ? Math.ceil(symbols.length/2) : symbols.length;
+for (const [i, symbol] of symbols.slice(0,slots).entries()) {
+  const ws = book.worksheets.add(paired ? `分足${i+1}` : symbol);
   ws.getRange("A2:G2").values = [bars];
   header(ws.getRange("A2:G2"));
   ws.getRange("A1").formulas = [['=_xll.RssChart(A2:G2,"'+symbol+'","1M",400)']];
@@ -56,11 +63,11 @@ for (const file of Object.keys(zip.files).filter(n=>/^xl\/worksheets\/sheet\d+\.
   zip.file(file,xml.replace(/(<x:c\b[^<>]*?) t="e"([^<>]*><x:f>_xll\.Rss(?:Market|Chart|IndexMarket)\([^<>]*<\/x:f>)<x:v>#NAME\?<\/x:v>/g,
     (_,a,b)=>{cleared++;return a+b;}));
 }
-if(cleared!==347) throw Error("Unexpected external formula caches");
+if(cleared!==symbols.length*quotes.length+slots+6) throw Error("Unexpected external formula caches");
 const wx=await zip.file("xl/workbook.xml").async("string");
 zip.file("xl/workbook.xml",wx.replace("</x:workbook>",'<x:calcPr calcId="0" calcMode="auto" fullCalcOnLoad="1"/></x:workbook>'));
 await fs.writeFile(target,await zip.generateAsync({type:"nodebuffer",compression:"DEFLATE"}));
 await fs.writeFile(path.join(output,"panel.json"),JSON.stringify({
-  version:1, symbols, ...(panel.target_session ? {session:panel.target_session} : {}),
+  version:paired ? 2 : 1, symbols, ...(panel.target_session ? {session:panel.target_session} : {}),
   workbook_sha256:createHash("sha256").update(await fs.readFile(target)).digest("hex")
 },null,2));

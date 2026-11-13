@@ -20,7 +20,7 @@ CAPTURES = (*BROKERS, *RESEARCH.values())
 NAMES = {
     "rakuten": "楽天 接続確認",
     "mufg_esmart": "カブコム 接続確認",
-    "panel": "楽天31銘柄研究",
+    "panel": "楽天・比較用研究取得",
     "kabu_panel": "カブコム31銘柄研究",
 }
 ROOTS = {
@@ -171,12 +171,13 @@ def rakuten_progress(project, requested_ns):
 def panel_bar_dates(data):
     if "current_day_chart_symbols" not in data:
         return ""
-    text = f"、当日分足 {data['current_day_chart_symbols']}/31銘柄"
+    total = data.get("target_symbols", 31)
+    text = f"、当日分足 {data['current_day_chart_symbols']}/{total}銘柄"
     if data.get("latest_chart_at"):
         latest = datetime.fromisoformat(data["latest_chart_at"]).astimezone(ZoneInfo("Asia/Tokyo"))
         text += f"（最新 {latest:%m/%d %H:%M}）"
     if "streaming_charts" in data:
-        text += f"、RSS配信中 {data['streaming_charts']}/31"
+        text += f"、RSS配信中 {data['streaming_charts']}/{total}"
     if data.get("connection_required_charts"):
         text += "。MARKET SPEED IIのログインを確認し、Excelが「未接続」なら押してください。"
     return text
@@ -196,22 +197,25 @@ def research_result(project, requested_ns=0, broker="panel"):
         if data["state"] not in {"stopped", "not_started", "failed", "needs_review"}:
             return None
         guidance = terminal_guidance(data["state"], reason)
+        if reason == "close_daily_book_manually":
+            return f"前回 {stamp:%m/%d %H:%M}：当日用の研究ブックを閉じてください。"
         if broker == "kabu_panel" or data["state"] == "not_started":
             detail = guidance or "停止。再開するには研究取得ボタンを押してください。"
             if reason == "one_pass_complete":
                 detail += f" 有効な板 {data.get('symbols_with_book', 0)}/31銘柄。"
             return f"前回 {stamp:%m/%d %H:%M}：{detail}"
+        total = data.get("target_symbols", 31)
         if data["state"] == "failed":
             detail = "異常終了：" + FAILURE_MESSAGES.get(
                 reason, "Excelと保存先を確認してください。"
             )
         elif data["state"] == "stopped" and reason == "one_pass_complete":
-            detail = f"一括取得・保存完了（分足 {data.get('chart_symbols', 0)}/31銘柄）"
+            detail = f"一括取得・保存完了（分足 {data.get('chart_symbols', 0)}/{total}銘柄）"
         elif data["state"] == "stopped" and reason == "one_pass_recent_only":
             detail = "直近分足を保存。当日分は全銘柄で揃っていません"
         elif data["state"] == "needs_review":
-            detail = f"取得が未完了（分足 {data.get('chart_symbols', 0)}/31銘柄）"
-            if data.get("streaming_charts") == 31:
+            detail = f"取得が未完了（分足 {data.get('chart_symbols', 0)}/{total}銘柄）"
+            if data.get("streaming_charts") == data.get("target_symbols", 31):
                 detail += "。当日分足が揃っていません"
             elif not data.get("connection_required_charts"):
                 detail += "。研究用Excel・RSSの接続と応答を確認してください"
@@ -391,7 +395,7 @@ class Launcher:
         actions.pack(fill="x")
         ttk.Button(
             actions,
-            text="選択した証券会社の研究取得（31銘柄）",
+            text="選択した証券会社の研究取得",
             command=self.start_research,
         ).pack(side="left", padx=(0, 10))
         ttk.Button(actions, text="すべての取得を停止", command=self.stop_all).pack(side="left")

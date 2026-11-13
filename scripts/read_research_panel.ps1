@@ -1,7 +1,8 @@
 ﻿# Read an already-open research workbook. Never create Excel, run macros, or place orders.
 param([Parameter(Mandatory=$true)][string]$WorkbookPath,
       [Parameter(Mandatory=$true)][string]$Symbols,
-      [ValidateSet(12,420)][int]$Rows=12)
+      [ValidateSet(12,420)][int]$Rows=12,
+      [ValidateRange(-1,1)][int]$Batch=-1)
 $ErrorActionPreference='Stop'
 [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
 $expected=@($Symbols.Split(','))
@@ -112,7 +113,15 @@ $stage='panel'
 $affectedSymbol=$null
 $retryLog=[Collections.Generic.List[object]]::new()
 try {
-    if($expected.Count -ne 31 -or @($expected|Where-Object {$_ -cnotmatch '^[0-9][A-Z0-9]{3}\.T$'}).Count){throw 'panel'}
+    $paired=$Batch -ge 0
+    if(((-not $paired) -and $expected.Count -ne 31) -or $expected.Count -lt 31 -or $expected.Count -gt 61 -or
+       @($expected|Where-Object {$_ -cnotmatch '^[0-9][A-Z0-9]{3}\.T$'}).Count -or
+       @($expected | Sort-Object -Unique).Count -ne $expected.Count){throw 'panel'}
+    $slots=$expected.Count
+    if($paired -and $slots -gt 50){$slots=[int][Math]::Ceiling($slots/2)}
+    $first=[Math]::Max(0,$Batch)*$slots
+    if($first -ge $expected.Count){throw 'panel'}
+    $last=$expected.Count+1
     $stage='attach'
     $app=[Runtime.InteropServices.Marshal]::GetActiveObject('Excel.Application')
     $stage='ready'
@@ -128,17 +137,17 @@ try {
     if($null -eq $book){throw 'workbook_not_found'}
     $stage='sheet_count'
     $sheets=Get-ExcelProperty $book 'Sheets'
-    if((Get-ExcelProperty $sheets 'Count') -ne 32){throw 'sheet_count'}
+    if((Get-ExcelProperty $sheets 'Count') -ne ($slots+1)){throw 'sheet_count'}
     $worksheets=Get-ExcelProperty $book 'Worksheets'
     $stage='quotes'
     $quoteSheet=Get-ExcelProperty $worksheets 'Item' @('気配')
-    $quotes=Get-ExcelProperty $quoteSheet 'Range' @('A1:K32')
+    $quotes=Get-ExcelProperty $quoteSheet 'Range' @("A1:K$last")
     $stage='quote_formulas_before'
-    $formulas=Read-Matrix $quotes 'Formula2' 32 11
+    $formulas=Read-Matrix $quotes 'Formula2' $last 11
     $stage='quote_values'
-    $vals=Read-Matrix $quotes 'Value2' 32 11
+    $vals=Read-Matrix $quotes 'Value2' $last 11
     $stage='quote_formulas_after'
-    $after=Read-Matrix $quotes 'Formula2' 32 11
+    $after=Read-Matrix $quotes 'Formula2' $last 11
     $stage='quote_identity'
     for($k=0;$k -lt $fields.Count;$k++){if($vals.GetValue(1,$k+2) -cne $fields[$k]){throw 'header'}}
     $result=@()
@@ -155,31 +164,74 @@ try {
                -not (Test-Formula ($after.GetValue($row,$j+2)) $wanted)){throw 'formula'}
             $q+=,($vals.GetValue($row,$j+2))
         }
-        $stage='chart_formula_before'
-        $ws=Get-ExcelProperty $worksheets 'Item' @($symbol)
-        $anchor=Get-ExcelProperty $ws 'Range' @('A1')
-        $wanted='=RssChart(A2:G2,"'+$symbol+'","1M",400)'
-        if(-not (Test-Formula (Get-ExcelProperty $anchor 'Formula2') $wanted)){throw 'chart'}
-        $stage='chart_boundary'
-        $sheetEnd=Get-ExcelProperty $ws 'Range' @('A1048576')
-        $usedEnd=Get-ExcelProperty $sheetEnd 'End' @(-4162)
-        $bottom=Get-ExcelProperty $usedEnd 'Row'
-        # Include a guard row to detect growth after End(xlUp). Header, end marker and
-        # OHLCV all come from one Value2 call, including when the live range shrinks.
-        $endRow=[Math]::Min(1048576,[Math]::Max(2,$bottom)+1)
-        $stage='chart_snapshot'
-        $range=Get-ExcelProperty $ws 'Range' @("A1:G${endRow}")
-        $matrix=Read-Matrix $range 'Value2' $endRow 7
-        $chartStatus=Get-ChartStatus ($matrix.GetValue(1,1)) $wanted
-        $bars=@(Get-ChartBars $matrix $Rows ($endRow -gt $bottom))
-        $stage='chart_formula_after'
-        if(-not (Test-Formula (Get-ExcelProperty $anchor 'Formula2') $wanted)){throw 'chart'}
-        $result+=@{symbol=$symbol;quote=$q;bars=$bars;chart_status=$chartStatus}
+        $result+=@{symbol=$symbol;quote=$q;bars=@();chart_status='not_polled'}
+    }
+    $chartIssue=$null
+    try {
+        $pending=@()
+        for($i=$first;$i -lt [Math]::Min($expected.Count,$first+$slots);$i++){
+            $symbol=$expected[$i]
+            $affectedSymbol=$symbol
+            $stage='chart_formula_before'
+            $sheetName=if($paired){"分足$($i-$first+1)"}else{$symbol}
+            $ws=Get-ExcelProperty $worksheets 'Item' @($sheetName)
+            $anchor=Get-ExcelProperty $ws 'Range' @('A1')
+            $wanted='=RssChart(A2:G2,"'+$symbol+'","1M",400)'
+            $current=Get-ExcelProperty $anchor 'Formula2'
+            # A collector restart can leave a slot between clearing and rebinding.
+            if(-not (Test-Formula $current $wanted)){
+                $otherIndex=if($first){$i-$first}else{$i+$slots}
+                if(-not $paired){throw 'chart'}
+                if($current -ne ''){
+                    if($otherIndex -ge $expected.Count){throw 'chart'}
+                    $prior='=RssChart(A2:G2,"'+$expected[$otherIndex]+'","1M",400)'
+                    if(-not (Test-Formula $current $prior)){throw 'chart'}
+                }
+                # Clear the dedicated sheet's old output before rebinding. Only the
+                # prevalidated chart formula is written. No broker/order calls.
+                $anchor.ClearContents() | Out-Null
+                $sheetEnd=Get-ExcelProperty $ws 'Range' @('A1048576')
+                $bottom=Get-ExcelProperty (Get-ExcelProperty $sheetEnd 'End' @(-4162)) 'Row'
+                if($bottom -gt 2){(Get-ExcelProperty $ws 'Range' @("A3:G$bottom")).ClearContents() | Out-Null}
+                $anchor.Formula2=$wanted
+                $result[$i].chart_status='subscribing'
+                continue
+            }
+            $pending+=@{index=$i;sheet=$ws;anchor=$anchor;formula=$wanted}
+        }
+        foreach($p in $pending){
+            $i=$p.index
+            $affectedSymbol=$expected[$i]
+            $ws=$p.sheet
+            $wanted=$p.formula
+            $anchor=$p.anchor
+            $stage='chart_boundary'
+            $sheetEnd=Get-ExcelProperty $ws 'Range' @('A1048576')
+            $usedEnd=Get-ExcelProperty $sheetEnd 'End' @(-4162)
+            $bottom=Get-ExcelProperty $usedEnd 'Row'
+            # Include a guard row to detect growth after End(xlUp). Header, end marker and
+            # OHLCV all come from one Value2 call, including when the live range shrinks.
+            $endRow=[Math]::Min(1048576,[Math]::Max(2,$bottom)+1)
+            $stage='chart_snapshot'
+            $range=Get-ExcelProperty $ws 'Range' @("A1:G${endRow}")
+            $matrix=Read-Matrix $range 'Value2' $endRow 7
+            $chartStatus=Get-ChartStatus ($matrix.GetValue(1,1)) $wanted
+            $bars=@(Get-ChartBars $matrix $Rows ($endRow -gt $bottom))
+            $stage='chart_formula_after'
+            if(-not (Test-Formula (Get-ExcelProperty $anchor 'Formula2') $wanted)){throw 'chart'}
+            $result[$i].chart_status=$chartStatus
+            if(-not $paired -or $chartStatus -eq 'streaming'){$result[$i].bars=$bars}
+        }
+    } catch {
+        if(-not $paired){throw}
+        # All quote identities, fields and values already passed validation.
+        # Retain that snapshot even if an independent chart operation failed.
+        $chartIssue=Get-ReadFailure $_.Exception $stage $affectedSymbol
     }
     $stage='indexes'
     $affectedSymbol=$null
     $indexes=@()
-    $ix=Get-ExcelProperty $quoteSheet 'Range' @('A36:D37')
+    $ix=Get-ExcelProperty $quoteSheet 'Range' @("A$($last+4):D$($last+5)")
     $ifm=Read-Matrix $ix 'Formula2' 2 4
     $iv=Read-Matrix $ix 'Value2' 2 4
     $ia=Read-Matrix $ix 'Formula2' 2 4
@@ -195,6 +247,7 @@ try {
         if($ok){$indexes+=@{code=$key;fields=$snapshot}}
     }
     $data=@{state='read';items=$result;indexes=$indexes}
+    if($chartIssue){$data.chart_issue=$chartIssue}
 } catch {
     $data=Get-ReadFailure $_.Exception $stage $affectedSymbol
 }

@@ -204,9 +204,12 @@ def run(
                 from trading_system.research.daytrade_universe import panel_location
 
                 panel = panel_location(project / "data/rss-panel", requested_day.date())
-                symbols = [
-                    s[:-2] for s in panel_symbols(json.loads((panel / "panel.json").read_bytes()))
-                ]
+                config = json.loads((panel / "panel.json").read_bytes())
+                allowed = panel_symbols(config)
+                if config["version"] == 2:
+                    selection = json.loads((panel / "selection.json").read_bytes())
+                    allowed = ["7203.T", *[r["code"][:4] + ".T" for r in selection["selected"]]]
+                symbols = [s[:-2] for s in allowed]
                 reason = wait_for_listener(0)
                 if reason:
                     status(

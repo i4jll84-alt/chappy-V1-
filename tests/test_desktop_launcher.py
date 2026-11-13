@@ -249,7 +249,7 @@ def test_launcher_buttons_use_selection_for_research_and_connection(tmp_path, mo
         ]
         assert all(str(b.pack_info()["side"]) == "left" for b in app_row)
         research_buttons = [label for label in buttons if "研究取得" in label]
-        assert research_buttons == ["選択した証券会社の研究取得（31銘柄）"]
+        assert research_buttons == ["選択した証券会社の研究取得"]
         assert "選択した証券会社を開始" not in buttons
         next(
             w for w in widgets if isinstance(w, ttk.Radiobutton) and w.cget("text") == "両方"

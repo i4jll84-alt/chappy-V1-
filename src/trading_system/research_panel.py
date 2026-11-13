@@ -14,7 +14,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from trading_system.brokers.locking import single_writer
-from trading_system.research_workbook import validate_workbook
+from trading_system.research_workbook import chart_batches, validate_workbook
 from trading_system.rss_stop import can_start
 from trading_system.storage.store import atomic_write, canonical
 
@@ -27,9 +27,9 @@ SYMBOL = re.compile(r"[0-9][0-9A-Z]{3}\.T")
 def panel_symbols(config):
     symbols = config["symbols"]
     if (
-        config["version"] != 1
-        or len(symbols) != 31
-        or len(set(symbols)) != 31
+        config["version"] not in (1, 2)
+        or not 31 <= len(symbols) <= (61 if config["version"] == 2 else 31)
+        or len(set(symbols)) != len(symbols)
         or any(not SYMBOL.fullmatch(s) for s in symbols)
         or "7203.T" not in symbols
     ):
@@ -49,7 +49,7 @@ def configuration(root):
     ):
         raise ValueError("invalid_panel_configuration")
     book = root / (f"研究用分足-{session}.xlsx" if session else BOOK_NAME)
-    validate_workbook(book, symbols)
+    validate_workbook(book, symbols, paired=config["version"] == 2)
     return symbols, book
 
 
@@ -73,7 +73,7 @@ def failure_reason(exc):
     return "research_start_failed"
 
 
-def capture(book, symbols, rows):
+def capture(book, symbols, rows, *, batch=None):
     shell = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
     try:
         p = subprocess.run(
@@ -91,6 +91,7 @@ def capture(book, symbols, rows):
                 ",".join(symbols),
                 "-Rows",
                 str(rows),
+                *(["-Batch", str(batch)] if batch is not None else []),
             ],
             capture_output=True,
             timeout=45,
@@ -196,6 +197,7 @@ def save(db, symbols, data, start, end):
         "streaming_charts": 0,
         "connection_required_charts": 0,
     }
+    day_symbols = []
     local_day = end.astimezone(JST).date().isoformat()
     with db:
         frame = db.execute(
@@ -271,6 +273,8 @@ def save(db, symbols, data, start, end):
             latest = max((k for k in parsed if k not in conflicts), default=None)
             if latest is not None:
                 counts["current_day_chart_symbols"] += int(latest[:10] == local_day)
+                if latest[:10] == local_day:
+                    day_symbols.append(symbol)
                 if counts["latest_chart_at"] is None or latest > counts["latest_chart_at"]:
                     counts["latest_chart_at"] = latest
             for key, values in parsed.items():
@@ -287,7 +291,30 @@ def save(db, symbols, data, start, end):
                         "INSERT INTO bars VALUES(?,?,?,?,?,?,?,?,?)", (frame, symbol, key, *values)
                     )
                     counts["bar_versions"] += 1
+    if "chart_batch" in data:
+        counts["day_symbols"] = day_symbols
     return {"state": state, "reason": data.get("reason"), **counts}
+
+
+def close_paired_book(book):
+    shell = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
+    closed = subprocess.run(
+        [
+            str(shell),
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(PROJECT / "scripts/close_paired_book.ps1"),
+            "-WorkbookPath",
+            str(book),
+        ],
+        timeout=15,
+        creationflags=subprocess.CREATE_NO_WINDOW,
+        capture_output=True,
+    )
+    return closed.returncode == 0
 
 
 def run(
@@ -334,6 +361,10 @@ def run(
 
             folder = panel_location(root, start_day.date())
             symbols, book = configuration(folder)
+            paired = (
+                folder != root and json.loads((folder / "panel.json").read_bytes())["version"] == 2
+            )
+            batches = chart_batches(symbols) if paired else [symbols]
             if stopped() or (not one_pass and clock() >= cutoff):
                 status(state="not_started", reason="stop_or_cutoff")
                 return
@@ -346,14 +377,58 @@ def run(
                 next_full = 0
                 fast_retry_used = False
                 awaiting_stream = False
+                batch_index = 0
+                batch_attempts = 0
+                received_today = set()
+                visited = set()
+                streamed = set()
                 result = {}
                 while not (reason := stopped()):
                     begin = clock()
                     rows = 420 if one_pass or count >= next_full else 12
-                    data = {**reader(book, symbols, rows), "requested_rows": rows}
+                    if paired:
+                        rows = 420 if batch_attempts == 0 or len(batches) > 1 else rows
+                        data = {
+                            **reader(book, symbols, rows, batch=batch_index),
+                            "chart_batch": batch_index,
+                            "requested_rows": rows,
+                        }
+                    else:
+                        data = {**reader(book, symbols, rows), "requested_rows": rows}
                     result = save(db, symbols, data, begin, clock())
                     success = result["state"] == "read"
                     streaming = result["streaming_charts"] == len(symbols)
+                    if paired:
+                        active = set(batches[batch_index])
+                        batch_attempts += 1
+                        active_ready = set()
+                        if success:
+                            for item in data["items"]:
+                                sym = item["symbol"]
+                                if sym not in active:
+                                    continue
+                                streamed.discard(sym)
+                                if item.get("chart_status") != "streaming":
+                                    continue
+                                streamed.add(sym)
+                                if item["bars"] and (
+                                    begin.astimezone(JST).hour < 9 or sym in result["day_symbols"]
+                                ):
+                                    active_ready.add(sym)
+                            received_today.update(result["day_symbols"])
+                        visited.update(active_ready)
+                        if active_ready == active or batch_attempts >= 4:
+                            batch_index = (batch_index + 1) % len(batches)
+                            batch_attempts = 0
+                        result.update(
+                            target_symbols=len(symbols),
+                            current_day_chart_symbols=len(received_today),
+                            chart_symbols=len(visited),
+                            streaming_charts=len(streamed),
+                        )
+                        if data.get("chart_issue"):
+                            result["chart_issue"] = data["chart_issue"].get("reason")
+                        streaming = len(streamed) == len(symbols)
                     if rows == 420:
                         # Keep one short poll between failed full reads so live quotes can progress.
                         next_full = count + (15 if success else 2)
@@ -367,7 +442,7 @@ def run(
                         if streaming and result["current_day_chart_symbols"] == len(symbols):
                             reason = "one_pass_complete"
                             break
-                        if count >= 4:
+                        if count >= 4 * len(batches) + (2 if paired else 0):
                             reason = (
                                 "one_pass_recent_only"
                                 if streaming and result["chart_symbols"] == len(symbols)
@@ -376,7 +451,7 @@ def run(
                             break
                     if success:
                         fast_retry_used = False
-                    wait_seconds = 15
+                    wait_seconds = 3 if paired and len(batches) > 1 else 15
                     if (
                         not fast_retry_used
                         and result["reason"]
@@ -406,6 +481,16 @@ def run(
                 )
             finally:
                 db.close()
+                if paired and opener is None:
+                    # Generated research book only. Release today's chart subscriptions.
+                    try:
+                        closed = close_paired_book(book)
+                    except (OSError, subprocess.TimeoutExpired):
+                        closed = False
+                    if not closed:
+                        status(
+                            state="needs_review", reason="close_daily_book_manually", frames=count
+                        )
         except Exception as exc:
             status(state="failed", reason=failure_reason(exc))
             raise

@@ -26,6 +26,15 @@ CONTROL = "72030"
 RULE = "five_sessions_turnover100_range30_v1"
 
 
+def paired_symbols(fixed, daily):
+    """Freeze a balanced, interleaved union; Toyota is a diagnostic outside both arms."""
+    for names in (fixed, daily):
+        panel_symbols({"version": 1, "symbols": ["7203.T", *names]})
+    return list(
+        dict.fromkeys(["7203.T", *(s for pair in zip(fixed, daily, strict=True) for s in pair)])
+    )
+
+
 def panel_location(root, day):
     """Return the published panel for this session; legacy mode ends on explicit adoption."""
     folder = root / "daily" / day.isoformat()
@@ -43,10 +52,17 @@ def panel_location(root, day):
             raise ValueError("invalid_panel_configuration")
         config = json.loads((folder / "panel.json").read_bytes())
         symbols = panel_symbols(config)
-        if config.get("session") != day.isoformat() or symbols != [
-            CONTROL[:4] + ".T",
-            *[x["code"][:4] + ".T" for x in manifest["selected"]],
-        ]:
+        daily = [x["code"][:4] + ".T" for x in manifest["selected"]]
+        expected = (
+            paired_symbols(manifest["fixed_symbols"], daily)
+            if "fixed_symbols" in manifest
+            else ["7203.T", *daily]
+        )
+        if "fixed_symbols" in manifest and (
+            config["version"] != 2 or manifest.get("capture_symbols") != expected
+        ):
+            raise ValueError("invalid_panel_configuration")
+        if config.get("session") != day.isoformat() or symbols != expected:
             raise ValueError("invalid_panel_configuration")
         return folder
     policy = root.parent.parent / "config/daytrade-universe.json"
@@ -280,6 +296,12 @@ def prepare(root, panel_root, day, *, now=None, preview=False):
                 sources=sources,
                 preview=preview,
             )
+            original = panel_symbols(json.loads((panel_root / "panel.json").read_bytes()))
+            manifest["fixed_symbols"] = [s for s in original if s != "7203.T"]
+            combined = paired_symbols(
+                manifest["fixed_symbols"], [r["code"][:4] + ".T" for r in selected]
+            )
+            manifest["capture_symbols"] = combined
             (folder / "selection.json").write_text(canonical(manifest), encoding="utf-8")
             with (folder / "候補.csv").open("w", encoding="utf-8-sig", newline="") as f:
                 writer = csv.writer(f)
@@ -309,7 +331,7 @@ def prepare(root, panel_root, day, *, now=None, preview=False):
                         ]
                     )
             symbols, _ = build_book(folder)
-            if symbols != [CONTROL[:4] + ".T", *[r["code"][:4] + ".T" for r in selected]]:
+            if symbols != combined:
                 raise ValueError("generated_panel_mismatch")
             manifest["published_at"] = (now or datetime.now(UTC)).isoformat()
             if not preview and datetime.fromisoformat(manifest["published_at"]) >= datetime.combine(

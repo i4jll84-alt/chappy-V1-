@@ -50,10 +50,13 @@ def active_status(broker, data, now):
     regular = time(9) <= clock < time(11, 30) or time(12, 30) <= clock < time(15, 30)
     stamp = saved.strftime("%H:%M:%S")
     if state == "read" and broker == "panel":
+        total = data.get("target_symbols", 31)
+        if data.get("chart_issue"):
+            return "板は保存中。分足の切替・読取を再試行しています。RSS接続を確認してください。"
         disconnected = data.get("connection_required_charts", 0)
         if disconnected:
             return (
-                f"RSS接続待ち {disconnected}/31銘柄。MARKET SPEED IIのログインを確認し、"
+                f"RSS接続待ち {disconnected}/{total}銘柄。MARKET SPEED IIのログインを確認し、"
                 "Excelが「未接続」なら押してください。"
             )
         if (local - saved).total_seconds() > 90:
@@ -62,26 +65,31 @@ def active_status(broker, data, now):
         streaming = data.get("streaming_charts")
         if local.weekday() >= 5:
             return f"週末・直近分足を確認中（最終保存 {stamp}）。操作は不要です。"
-        if preopen and streaming == 31:
-            return f"準備完了・寄り付き待ち（RSS配信中 31/31、最終保存 {stamp}）。操作は不要です。"
+        if preopen and streaming == total:
+            return (
+                f"準備完了・寄り付き待ち（RSS配信中 {total}/{total}、最終保存 {stamp}）。"
+                "操作は不要です。"
+            )
         if n is None:
             return f"Excel読取中（最終保存 {stamp}）。当日分足の確認を待っています。"
         if preopen:
             return f"寄り前・配信確認中（最終保存 {stamp}）。ExcelのRSS接続を確認してください。"
         if lunch or not regular:
             phase = "昼休み" if lunch else "引け後"
-            return f"{phase}・当日分足 {n}/31銘柄（最終保存 {stamp}）。"
+            return f"{phase}・当日分足 {n}/{total}銘柄（最終保存 {stamp}）。"
         if n == 0:
             if clock < time(9, 5):
                 return f"寄り付き・当日分足待ち（最終保存 {stamp}）。初回配信を待っています。"
-            return f"当日分足 0/31銘柄（最終保存 {stamp}）。取引日ならRSS接続を確認してください。"
+            return (
+                f"当日分足 0/{total}銘柄（最終保存 {stamp}）。取引日ならRSS接続を確認してください。"
+            )
         latest = data.get("latest_chart_at")
         bar = datetime.fromisoformat(latest).astimezone(JST) if latest else None
         if bar and (local - bar).total_seconds() > 300 and not time(12, 30) <= clock < time(12, 35):
             return (
                 f"分足の更新待ち（最新足 {bar:%H:%M}、保存 {stamp}）。RSS接続を確認してください。"
             )
-        return f"当日分足受信中 {n}/31銘柄（最終保存 {stamp}）。自動取得中です。"
+        return f"当日分足受信中 {n}/{total}銘柄（最終保存 {stamp}）。自動取得中です。"
 
     if state == "recording" and broker == "kabu_panel":
         if reason in {"board_http_429", "token_http_429"}:

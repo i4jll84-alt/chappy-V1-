@@ -348,6 +348,24 @@ def after_stop(project, day, broker):
         canonical({**result, "date": str(day), "at": datetime.now(UTC).isoformat()}).encode(),
         sharing_retries=50,
     )
+    if (
+        broker == "rakuten"
+        and result["state"] == "published"
+        and (project / f"data/rss-panel/daily/{day}/selection.json").is_file()
+    ):
+        from trading_system.research.paired_comparison import compare
+
+        if datetime.now(JST) >= datetime.combine(day, datetime.min.time(), JST) + timedelta(
+            hours=15, minutes=30
+        ):
+            try:
+                state = compare(project, day)["state"]
+            except (OSError, ValueError, KeyError, sqlite3.Error) as exc:
+                state = "failed_" + type(exc).__name__
+            atomic_write(
+                target / "comparison-status.json",
+                canonical({"date": str(day), "state": state}).encode(),
+            )
 
 
 def main():
