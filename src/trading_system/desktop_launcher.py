@@ -4,7 +4,7 @@ import json
 import os
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime, time
+from datetime import UTC, date, datetime, time
 from pathlib import Path
 from time import time_ns
 from uuid import uuid4
@@ -129,6 +129,27 @@ def save_market_day(project, day):
     from trading_system.research.swing_daily import collect
 
     return collect(day, market_day_settings(project))
+
+
+def manual_research_workbook(project, now):
+    import sqlite3
+
+    from trading_system.research.daytrade_universe import JST, calendar_days, panel_location
+    from trading_system.research_panel import configuration
+
+    local = now.astimezone(JST)
+    today = local.date().isoformat()
+    try:
+        calendar, _ = calendar_days(market_day_settings(project).data_root, local.date(), now)
+    except sqlite3.Error as exc:
+        raise ValueError("exchange_calendar_unavailable") from exc
+    for day in sorted(calendar):
+        if day < today or (day == today and local.time() >= time(16)):
+            continue
+        if calendar[day] in ("1", "2"):
+            folder = panel_location(collector_root(project, "panel"), date.fromisoformat(day))
+            return configuration(folder)[1]
+    raise ValueError("incomplete_exchange_calendar")
 
 
 def panel_status(report):
@@ -383,9 +404,9 @@ class Launcher:
             text="kabuステーション",
             command=lambda: self.open_app("mufg_app"),
         ).pack(side="left", padx=7)
-        ttk.Button(
-            preparation, text="楽天の接続確認用Excelを開く", command=self.open_workbook
-        ).pack(side="left", padx=7)
+        ttk.Button(preparation, text="楽天用Excelを開く", command=self.open_rakuten_workbooks).pack(
+            side="left", padx=7
+        )
         ttk.Label(
             frame,
             text="楽天：ログイン後、ExcelのRSSが「未接続」なら接続してください。\nカブコム：APIパスワードは開始時に入力します。保存しません。",
@@ -534,6 +555,26 @@ class Launcher:
             self.daily_seen = None
             message = "稼働状態を確認できません。設定と保存先を確認してください。"
         self.daily_status.set(message)
+
+    def open_rakuten_workbooks(self):
+        opened = []
+        errors = []
+        try:
+            os.startfile(self.workbook)
+            opened.append(self.workbook.name)
+        except OSError:
+            errors.append("接続確認用Excelを開けません。ファイルと関連付けを確認してください。")
+        try:
+            book = manual_research_workbook(self.project, datetime.now(UTC))
+            os.startfile(book)
+            opened.append(book.name)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            if str(exc) == "daily_panel_missing":
+                errors.append("研究用分足が未作成です。前営業日の日足保存を確認してください。")
+            else:
+                errors.append("研究用分足を開けません。営業日と研究ブックを確認してください。")
+        messages = (["Excelで開きます：" + "、".join(opened)] if opened else []) + errors
+        self.message.set("\n".join(messages))
 
     def open_workbook(self, cutoff=None):
         from tkinter import messagebox

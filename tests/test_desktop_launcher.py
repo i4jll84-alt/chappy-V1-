@@ -245,9 +245,17 @@ def test_launcher_buttons_use_selection_for_research_and_connection(tmp_path, mo
         assert [b.cget("text") for b in app_row] == [
             "MARKET SPEED II",
             "kabuステーション",
-            "楽天の接続確認用Excelを開く",
+            "楽天用Excelを開く",
         ]
         assert all(str(b.pack_info()["side"]) == "left" for b in app_row)
+        book = tmp_path / "研究用分足-2026-11-16.xlsx"
+        monkeypatch.setattr(launcher, "manual_research_workbook", lambda *_: book)
+        opened = []
+        monkeypatch.setattr(launcher.os, "startfile", opened.append, raising=False)
+        buttons["楽天用Excelを開く"].invoke()
+        assert opened == [view.workbook, book]
+        check.assert_not_called()
+        study.assert_not_called()
         research_buttons = [label for label in buttons if "研究取得" in label]
         assert research_buttons == ["選択した証券会社の研究取得"]
         assert "選択した証券会社を開始" not in buttons
@@ -274,6 +282,66 @@ def test_launcher_buttons_use_selection_for_research_and_connection(tmp_path, mo
         )
     finally:
         window.destroy()
+
+
+@pytest.mark.parametrize(
+    "stamp,target",
+    [
+        ("2026-11-13T06:59:59+00:00", "2026-11-13"),
+        ("2026-11-13T07:00:00+00:00", "2026-11-16"),
+        ("2026-11-14T01:00:00+00:00", "2026-11-16"),
+        ("2026-11-16T07:00:00+00:00", "2026-11-18"),
+    ],
+)
+def test_manual_research_workbook_targets_exchange_session(tmp_path, monkeypatch, stamp, target):
+    from trading_system import research_panel
+    from trading_system.research import daytrade_universe as universe
+
+    calendar = dict(
+        zip(
+            ("2026-11-13", "2026-11-14", "2026-11-15", "2026-11-16", "2026-11-17", "2026-11-18"),
+            ("1", "0", "0", "1", "3", "1"),
+            strict=True,
+        )
+    )
+    monkeypatch.setattr(launcher, "market_day_settings", lambda p: SimpleNamespace(data_root=p))
+    monkeypatch.setattr(universe, "calendar_days", lambda *_: (calendar, []))
+    monkeypatch.setattr(universe, "panel_location", lambda root, day: root / "daily" / str(day))
+    monkeypatch.setattr(
+        research_panel, "configuration", lambda folder: ([], folder / "研究用分足.xlsx")
+    )
+    assert launcher.manual_research_workbook(tmp_path, datetime.fromisoformat(stamp)) == (
+        tmp_path / "data/rss-panel/daily" / target / "研究用分足.xlsx"
+    )
+
+
+@pytest.mark.parametrize("missing", ["connection", "research"])
+def test_manual_excel_opens_available_book_on_partial_failure(tmp_path, monkeypatch, missing):
+    view = launcher.Launcher.__new__(launcher.Launcher)
+    view.project = tmp_path
+    view.workbook = tmp_path / "RSS接続確認.xlsx"
+    view.message = Mock()
+    research = tmp_path / "研究用分足.xlsx"
+    opened = []
+
+    def start(path):
+        if missing == "connection" and path == view.workbook:
+            raise FileNotFoundError(path)
+        opened.append(path)
+
+    def resolve(*args):
+        if missing == "research":
+            raise ValueError("daily_panel_missing")
+        return research
+
+    monkeypatch.setattr(launcher.os, "startfile", start, raising=False)
+    monkeypatch.setattr(launcher, "manual_research_workbook", resolve)
+    view.open_rakuten_workbooks()
+    expected = research if missing == "connection" else view.workbook
+    assert opened == [expected] and expected.name in view.message.set.call_args.args[0]
+    assert (
+        "開けません" if missing == "connection" else "未作成"
+    ) in view.message.set.call_args.args[0]
 
 
 def daily_view(tmp_path):
