@@ -12,6 +12,7 @@ from pathlib import Path
 from trading_system.brokers.locking import single_writer
 from trading_system.research.daytrade_universe import JST, calendar_days, dated_inputs
 from trading_system.research.swing_credit import capture, read_credit
+from trading_system.research.swing_rule_review import save_review
 from trading_system.research.swing_windows import history_rows
 from trading_system.storage.store import atomic_write, canonical
 
@@ -527,6 +528,9 @@ def run(project, action, answer=None):
             write(root / "initial.json", dict(start=START, accounts=initial()))
         if action == "init":
             return {"state": "initialized", "start": START}
+        if action == "review":
+            closes = sorted((root / "sessions").glob("*/close.json"))
+            return save_review(root, closes[-1].parent.name if closes else day)
         sessions = calendar(project / "data/jquants", now.date(), now)
         if day not in sessions:
             return {"state": "exchange_closed"}
@@ -546,7 +550,14 @@ def run(project, action, answer=None):
                         credit[d] = capture(project, d)
                     except Exception as exc:
                         credit[d] = f"needs_review:{type(exc).__name__}:{exc}"
-            return dict(state="evening", settled=settled, credit=credit)
+            result = dict(state="evening", settled=settled, credit=credit)
+            if (root / "sessions" / day / "close.json").exists():
+                report = save_review(root, day)
+                result["review"] = {
+                    "file": f"reviews/{day}.json",
+                    "matched_credit": report["matched_credit"],
+                }
+            return result
         if day < START:
             return {"state": "before_start"}
         if action == "morning":
@@ -583,7 +594,7 @@ def catch_up(project, root, last, now):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("action", choices=["init", "morning", "record-agent", "evening"])
+    p.add_argument("action", choices=["init", "morning", "record-agent", "evening", "review"])
     p.add_argument("--answer", type=Path)
     args = p.parse_args()
     result = run(Path.cwd(), args.action, args.answer)
