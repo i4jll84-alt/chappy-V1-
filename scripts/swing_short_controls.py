@@ -135,10 +135,7 @@ def evaluate(mode, packets, reference, calendar, prices, fees):
     ), records
 
 
-def main():
-    calendar, quotes, _, _, _ = get_history()
-    sources = sf.read(OUT / "signals.json")
-    books = sf.read(OUT / "books.json")
+def fee_tables(calendar):
     fees, _ = reverse_fee_table()
     history_fees = dict(fees)
     for day in calendar:
@@ -148,6 +145,14 @@ def main():
                 fee = row["品貸料率（円）"].strip()
                 if fee and (not fee.strip("*＊") or fee.replace(".", "", 1).isdigit()):
                     history_fees.setdefault((day, code), D(0) if not fee.strip("*＊") else D(fee))
+    return fees, history_fees
+
+
+def main():
+    calendar, quotes, _, _, _ = get_history()
+    sources = sf.read(OUT / "signals.json")
+    books = sf.read(OUT / "books.json")
+    fees, history_fees = fee_tables(calendar)
     results = {}
     all_paths = {}
     for name, key, first, f in [
