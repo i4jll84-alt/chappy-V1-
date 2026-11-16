@@ -542,7 +542,12 @@ class Launcher:
                     f"{report['date']} 保存完了（日足 {report['daily_rows']:,} 銘柄）"
                     + panel_status(report)
                     + (
-                        f" ／ A0_5 {report['a0_5']['state']}（予定・口座監査を参照）"
+                        " ／ A0_5 "
+                        + " / ".join(
+                            f"{int(capital) // 10000}万円:{account['state']}"
+                            for capital, account in report["a0_5"].get("accounts", {}).items()
+                        )
+                        + "（予定・口座監査を参照）"
                         if "a0_5" in report
                         else ""
                     )

@@ -15,11 +15,11 @@ from .a0_5_rules.data_fetcher import iso
 from .a0_5_rules.live_portfolio import buying_power
 
 
-def initial():
+def initial(capital=A0_5.capital):
     return dict(
         revision=0,
-        capital=A0_5.capital,
-        cash=float(A0_5.capital),
+        capital=int(capital),
+        cash=float(capital),
         positions=[],
         settlements=[],
         journal=[],
@@ -31,13 +31,15 @@ def initial():
     )
 
 
-def load(root):
+def load(root, capital=A0_5.capital):
     path = root / "ledger.sqlite"
     if not path.is_file():
-        return initial()
+        return initial(capital)
     with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as db:
         row = db.execute("SELECT body FROM revisions ORDER BY revision DESC LIMIT 1").fetchone()
-        state = json.loads(row[0]) if row else initial()
+        state = json.loads(row[0]) if row else initial(capital)
+        if int(state.get("capital", capital)) != int(capital):
+            raise ValueError("ペーパー口座の元本と台帳が一致しません")
         for day, ref in state["plans"].items():
             if isinstance(ref, str):
                 payload = db.execute("SELECT body FROM decisions WHERE digest=?", (ref,)).fetchone()
@@ -49,6 +51,7 @@ def load(root):
 
 def save(root, state):
     # Writers also hold the project-scoped OS lock for the whole read/plan/commit sequence.
+    root.mkdir(parents=True, exist_ok=True)
     with closing(sqlite3.connect(root / "ledger.sqlite")) as db, db:
         db.execute(
             "CREATE TABLE IF NOT EXISTS revisions(revision INTEGER PRIMARY KEY,body TEXT NOT NULL)"

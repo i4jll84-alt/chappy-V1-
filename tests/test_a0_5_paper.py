@@ -115,14 +115,21 @@ def test_off_on_existing_four_books_and_no_broker_calls(tmp_path, monkeypatch):
 
     monkeypatch.setattr(a0_5, "assess", fake)
     first = a0_5.run(tmp_path, now=NOW)
+    assert set(first["accounts"]) == {"1000000", "3000000"}
+    for capital in (1_000_000, 3_000_000):
+        root = a0_5.root_for(tmp_path, capital)
+        before = book.load(root, capital)
+        assert before["capital"] == capital and before["cash"] == capital
+        assert a0_5.run(tmp_path, now=NOW) == first
+        assert before == book.load(root, capital)
+        assert len(list(root.rglob("plan.csv"))) == 1
     root = a0_5.root_for(tmp_path)
-    before = book.load(root)
-    assert a0_5.run(tmp_path, now=NOW) == first and before == book.load(root)
-    assert before["cash"] == A0_5.capital
-    assert len(list(root.rglob("plan.csv"))) == 1
     (path.parent / "STOP").touch()
     assert a0_5.run(tmp_path, now=NOW)["state"] == "stopped"
-    assert a0_5.status(tmp_path, NOW)["decision"] is None
+    assert all(
+        account["decision"] is None
+        for account in a0_5.status(tmp_path, NOW)["accounts"].values()
+    )
     (path.parent / "STOP").unlink()
 
     def fail(*args):
@@ -130,12 +137,17 @@ def test_off_on_existing_four_books_and_no_broker_calls(tmp_path, monkeypatch):
 
     monkeypatch.setattr(a0_5, "assess", fail)
     result = a0_5.run(tmp_path, now=NOW, revise=True)
-    assert (
-        result["state"] == "blocked"
-        and not (
-            root / "sessions" / "2026-11-19" / f"v{result['saved_revision']:06d}" / "plan.csv"
+    assert set(result["accounts"]) == {"1000000", "3000000"}
+    for capital, account_result in result["accounts"].items():
+        account_root = a0_5.root_for(tmp_path, int(capital))
+        assert account_result["state"] == "blocked"
+        assert not (
+            account_root
+            / "sessions"
+            / "2026-11-19"
+            / f"v{account_result['saved_revision']:06d}"
+            / "plan.csv"
         ).exists()
-    )
     assert "予定生成停止" in describe(a0_5.status(tmp_path, NOW))
     a0_5.select(tmp_path, False)
     assert path.read_bytes() == frozen and swing_forward.initial() == old
@@ -144,7 +156,7 @@ def test_off_on_existing_four_books_and_no_broker_calls(tmp_path, monkeypatch):
 def test_manual_calendar_cutoff_and_cross_day(tmp_path):
     now = NOW
     a0_5.manual_schedule(tmp_path, "10000", "none", "会社IR 11月19日", now)
-    manual = book.load(a0_5.root_for(tmp_path))["manual"]
+    manual = book.load(a0_5.root_for(tmp_path, 1_000_000), 1_000_000)["manual"]
     info, _ = a0_5.inputs.schedules(tmp_path, ["10000"], pd.Timestamp("2026-11-19"), now, manual)
     assert info["10000"][0] == ""
     earlier = now.replace(hour=16)

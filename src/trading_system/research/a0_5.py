@@ -2,6 +2,7 @@
 
 import argparse
 import json
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -13,7 +14,7 @@ from trading_system.storage.store import atomic_write
 
 from . import a0_5_book as book
 from . import a0_5_inputs as inputs
-from .a0_5_rules.config import A0_5
+from .a0_5_rules.config import A0_5, A0_5_PAPER_CAPITALS
 from .a0_5_rules.data_fetcher import iso
 from .a0_5_rules.live_portfolio import code_of
 from .a0_5_rules.live_screen import LIVE_COLUMNS, plan
@@ -21,13 +22,14 @@ from .a0_5_rules.strategy import Position, ranked_candidates, sector_code
 from .a0_5_rules.strategy import orders as fixed_orders
 from .daytrade_universe import dated_inputs
 
-NAME = "A0_5 順張りブレイクアウト"
+NAME = "A0_5 順張りブレイクアウト（100万円・300万円）"
 MODE = "運用ガード付きペーパー"
 JST = ZoneInfo("Asia/Tokyo")
 
 
-def root_for(project):
-    return project / "data/a0-5-paper"
+def root_for(project, capital=None):
+    root = project / "data/a0-5-paper"
+    return root if capital is None else root / "accounts" / str(int(capital))
 
 
 def enabled(project):
@@ -47,11 +49,17 @@ def select(project, active):
         if active and not flag.exists():
             atomic_write(flag, datetime.now(JST).isoformat().encode())
         elif not active and flag.exists():
-            s = book.load(root)
-            for entry in s["plans"].values():
-                if entry.get("state") == "ready" and entry["order_date"] not in s["openings"]:
-                    entry["state"] = "disabled"
-            book.save(root, s)
+            for capital in A0_5_PAPER_CAPITALS:
+                account = root_for(project, capital)
+                if (account / "ledger.sqlite").is_file():
+                    s = book.load(account, capital)
+                    for entry in s["plans"].values():
+                        if (
+                            entry.get("state") == "ready"
+                            and entry["order_date"] not in s["openings"]
+                        ):
+                            entry["state"] = "disabled"
+                    book.save(account, s)
             flag.unlink()
 
 
@@ -61,13 +69,15 @@ def manual_schedule(project, code, scheduled, source, now):
     scheduled = "" if scheduled == "none" else iso(pd.Timestamp(scheduled))
     if not source.strip() or (scheduled and scheduled <= day):
         raise ValueError("確認した原本と将来の決算日（期間内予定なしは none）を指定してください")
-    root = root_for(project)
-    with single_writer(root):
-        s = book.load(root)
-        s["manual"].setdefault(day, {})[code] = dict(
-            scheduled_date=scheduled, source=source.strip(), received_at=now.isoformat()
-        )
-        book.save(root, s)
+    base = root_for(project)
+    with single_writer(base):
+        for capital in A0_5_PAPER_CAPITALS:
+            root = root_for(project, capital)
+            s = book.load(root, capital)
+            s["manual"].setdefault(day, {})[code] = dict(
+                scheduled_date=scheduled, source=source.strip(), received_at=now.isoformat()
+            )
+            book.save(root, s)
 
 
 def assess(project, day, now, s):
@@ -82,7 +92,8 @@ def assess(project, day, now, s):
         for r in history.itertuples()
         if pd.notna(r.AdjFactor) and r.AdjFactor != 1
     }
-    orders, notes, summary = plan(history, day, cal, s, schedule, actions)
+    config = replace(A0_5, capital=int(s["capital"]))
+    orders, notes, summary = plan(history, day, cal, s, schedule, actions, config)
     # Compare both order builders on the same close, holdings and input version.
     at_close = history.set_index("Code")
     positions = {
@@ -96,7 +107,7 @@ def assess(project, day, now, s):
         )
         for p in s["positions"]
     }
-    fixed = fixed_orders(history, day, cal, s["cash"], positions, A0_5)
+    fixed = fixed_orders(history, day, cal, s["cash"], positions, config)
     comparison = []
     for side, code in sorted(set(zip(fixed.side, fixed.Code)) | set(zip(orders.side, orders.Code))):
         lhs = fixed.loc[fixed.side.eq(side) & fixed.Code.eq(code)]
@@ -201,8 +212,21 @@ def mark_stop(project, day, now):
         )
 
 
-def opening(project, now=None):
+def opening(project, now=None, capital=None):
     now = now or datetime.now(JST)
+    if capital is None:
+        accounts = {
+            str(value): opening(project, now, value) for value in A0_5_PAPER_CAPITALS
+        }
+        states = {row["state"] for row in accounts.values()}
+        state = (
+            "stopped"
+            if "stopped" in states
+            else next(iter(states))
+            if len(states) == 1
+            else "partial"
+        )
+        return {"state": state, "accounts": accounts}
     day = pd.Timestamp(now.astimezone(JST).date())
     if not enabled(project):
         return {"state": "off"}
@@ -211,19 +235,19 @@ def opening(project, now=None):
         return {"state": "stopped"}
     if now.astimezone(JST).hour < 9:
         return {"state": "before_open"}
-    root = root_for(project)
-    with single_writer(root):
+    root = root_for(project, capital)
+    with single_writer(root_for(project)):
         if not enabled(project) or stopped(project):
             return {"state": "stopped"}
         try:
-            s = apply_openings(project, book.load(root), day, now)
+            s = apply_openings(project, book.load(root, capital), day, now, capital)
         except FileNotFoundError:
             return {"state": "waiting_for_verified_open", "date": iso(day)}
         return {"state": "reconciled", "date": iso(day), "last_open": s["last_open"]}
 
 
-def apply_openings(project, s, through, now):
-    root = root_for(project)
+def apply_openings(project, s, through, now, capital=A0_5.capital):
+    root = root_for(project, capital)
     todo = {
         r["order_date"]
         for r in s["plans"].values()
@@ -259,7 +283,7 @@ def apply_openings(project, s, through, now):
         else:
             prices, refs = {}, []
         pre = project / "data/swing-forward/sessions" / date / "preopen.json"
-        skipped = (root / "stops" / (date + ".json")).is_file() or (
+        skipped = (root_for(project) / "stops" / (date + ".json")).is_file() or (
             pre.is_file() and json.loads(pre.read_bytes()).get("stopped") is True
         )
         if skipped:
@@ -271,8 +295,28 @@ def apply_openings(project, s, through, now):
     return s
 
 
-def run(project, date=None, *, now=None, preview=False, refresh=False, revise=False):
+def run(
+    project, date=None, *, now=None, preview=False, refresh=False, revise=False, capital=None
+):
     now = now or datetime.now(JST)
+    if capital is None:
+        if refresh:
+            inputs.refresh_flow(project, now)
+            now = datetime.now(JST)
+            refresh = False
+        accounts = {
+            str(value): run(
+                project,
+                date,
+                now=now,
+                preview=preview,
+                refresh=refresh,
+                revise=revise,
+                capital=value,
+            )
+            for value in A0_5_PAPER_CAPITALS
+        }
+        return {"state": "accounts", "mode": MODE, "accounts": accounts}
     day = pd.Timestamp(date or now.astimezone(JST).date())
     if not preview and not enabled(project):
         return {"state": "off", "mode": MODE}
@@ -284,20 +328,20 @@ def run(project, date=None, *, now=None, preview=False, refresh=False, revise=Fa
         if refresh:
             inputs.refresh_flow(project, now)
             now = datetime.now(JST)
-        s = book.load(root_for(project))
+        s = book.load(root_for(project, capital), capital)
         return assess(project, day, now, s)
-    root = root_for(project)
-    with single_writer(root):
+    root = root_for(project, capital)
+    with single_writer(root_for(project)):
         if not enabled(project) or stopped(project):
             return {"state": "stopped", "mode": MODE}
-        s = book.load(root)
+        s = book.load(root, capital)
         if not s["started_at"]:
-            s["started_at"] = (root / "enabled").read_text()
+            s["started_at"] = (root_for(project) / "enabled").read_text()
             book.save(root, s)
         # A late receipt can settle a frozen order; only today can get a new decision.
         if day > pd.Timestamp(now.astimezone(JST).date()):
             raise ValueError("将来日の評価")
-        s = apply_openings(project, s, day, now)
+        s = apply_openings(project, s, day, now, capital)
         if iso(day) != now.astimezone(JST).date().isoformat():
             return {"state": "reconciled", "date": iso(day), "mode": MODE}
         old = s["plans"].get(iso(day))
@@ -340,7 +384,17 @@ def after_daily(project, date):
         return None
     try:
         r = run(project, date, refresh=True)
-        return {k: r[k] for k in ("state", "date", "order_date", "reason") if k in r}
+        return {
+            "state": "accounts",
+            "accounts": {
+                capital: {
+                    k: value[k]
+                    for k in ("state", "date", "order_date", "reason")
+                    if k in value
+                }
+                for capital, value in r["accounts"].items()
+            },
+        }
     except Exception as exc:
         # A paper failure must not turn a successfully saved daily receipt into a failed collection.
         return {
@@ -351,9 +405,20 @@ def after_daily(project, date):
         }
 
 
-def status(project, now=None):
+def status(project, now=None, capital=None):
     now = now or datetime.now(JST)
-    s = book.load(root_for(project))
+    if capital is None:
+        accounts = {
+            str(value): status(project, now, value) for value in A0_5_PAPER_CAPITALS
+        }
+        return dict(
+            strategy=NAME,
+            mode=MODE,
+            enabled=enabled(project),
+            stopped=stopped(project),
+            accounts=accounts,
+        )
+    s = book.load(root_for(project, capital), capital)
     active = enabled(project)
     stop = stopped(project)
     rec = s["plans"].get(now.astimezone(JST).date().isoformat()) if active and not stop else None

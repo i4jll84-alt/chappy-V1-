@@ -91,7 +91,7 @@ def freshness(history, date, cal, now=None):
     )
 
 
-def plan(day, date, calendar, account, calendar_info, actions):
+def plan(day, date, calendar, account, calendar_info, actions, config=A0_5):
     i = calendar.get_loc(date)
     if len(calendar) <= i + 3:
         raise ValueError("決算3立会日の対象末日を確認できません。カレンダーを更新してください。")
@@ -175,10 +175,10 @@ def plan(day, date, calendar, account, calendar_info, actions):
     available = buying_power(account, date)
     if available < 0:
         raise ValueError("未受渡拘束額が現金残高を超えています。口座を確認してください。")
-    free = max(0, A0_5.slots - sum(retained.values()))
-    slots = min(free, A0_5.max_daily_entries)
+    free = max(0, config.slots - sum(retained.values()))
+    slots = min(free, config.max_daily_entries)
     sector_free = {
-        s: max(0, 2 - retained[s])
+        s: max(0, config.max_positions_per_sector - retained[s])
         for s in sorted(set(day.S33.dropna().astype(str)) | set(existing))
     }
     budget = available
@@ -195,12 +195,12 @@ def plan(day, date, calendar, account, calendar_info, actions):
             reason = "保有中"
         elif not slots:
             reason = "保有枠・日次枠外"
-        elif not s or retained[s] + selected[s] >= 2:
+        elif not s or retained[s] + selected[s] >= config.max_positions_per_sector:
             reason = "業種枠外"
         else:
-            unit = r.C * (1 + A0_5.slip_bps / 10000) * (1 + A0_5.fee_bps / 10000)
-            shares = floor(min(equity * 0.2, budget) / (unit * A0_5.lot)) * A0_5.lot
-            if shares < 100:
+            unit = r.C * (1 + config.slip_bps / 10000) * (1 + config.fee_bps / 10000)
+            shares = floor(min(equity * 0.2, budget) / (unit * config.lot)) * config.lot
+            if shares < config.lot:
                 reason = "単元予算不足"
             else:
                 # Reserve original choices before applying earnings exclusions. No replacements.
@@ -209,8 +209,9 @@ def plan(day, date, calendar, account, calendar_info, actions):
                 budget -= shares * unit
                 if not near and scheduled is not None:
                     conditional = (
-                        len(held) + len(buys) + 1 > 5
-                        or existing[s] + sum(b["S33"] == s for b in buys) + 1 > 2
+                        len(held) + len(buys) + 1 > config.slots
+                        or existing[s] + sum(b["S33"] == s for b in buys) + 1
+                        > config.max_positions_per_sector
                     )
                     buys.append(append("BUY", c, shares, "A0_5", s, conditional))
                     reason = "寄成買い"

@@ -92,3 +92,7 @@ A0_5: Final[Config] = Config(
     require_topix_above_sma75=False,
     require_foreigners_net_buy=False,
 )
+
+# Forward paper accounts are separate cash ledgers. Keep the pinned 5m config above
+# unchanged for historical replay reproducibility.
+A0_5_PAPER_CAPITALS: Final[tuple[int, ...]] = (1_000_000, 3_000_000)

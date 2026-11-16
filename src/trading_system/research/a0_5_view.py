@@ -2,6 +2,11 @@
 
 
 def describe(s):
+    if "accounts" in s:
+        return "\n\n".join(
+            f"【{int(capital):,}円口座】\n{describe(account)}"
+            for capital, account in s["accounts"].items()
+        )
     a = s["audit"]
     rec = s["decision"]
     lines = [
