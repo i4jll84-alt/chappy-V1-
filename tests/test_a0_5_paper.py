@@ -226,3 +226,30 @@ def test_bulk_cutoff_and_revision_hash(tmp_path):
     assert read(NOW)[0] == 1
     with pytest.raises(ValueError, match="検証失敗"):
         read(NOW.replace(hour=20))
+
+
+def test_frozen_exports_preserve_bytes_and_recover_missing_csv(tmp_path, monkeypatch):
+    import json
+
+    root = tmp_path / "paper"
+    record = dict(state="ready", date="2026-11-16", orders=[], candidates=[])
+    a0_5.export(root, record, 2)
+    folder = root / "sessions/2026-11-16/v000002"
+    decision, plan = folder / "decision.json", folder / "plan.csv"
+    # Existing releases may have used a different field order.
+    original = json.dumps(record, indent=4).encode()
+    decision.write_bytes(original)
+    expected_csv = plan.read_bytes()
+    plan.unlink()
+    a0_5.export(root, record, 2)
+    assert decision.read_bytes() == original and plan.read_bytes() == expected_csv
+    monkeypatch.setattr(a0_5, "atomic_write", lambda *args: pytest.fail("frozen file rewritten"))
+    a0_5.export(root, dict(reversed(list(record.items()))), 2)
+    plan.write_bytes(b"changed")
+    with pytest.raises(ValueError, match="保存済み予定が不一致"):
+        a0_5.export(root, record, 2)
+    assert plan.read_bytes() == b"changed"
+    decision.write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="保存済み判定が不一致"):
+        a0_5.export(root, record, 2)
+    assert decision.read_bytes() == b"{}"

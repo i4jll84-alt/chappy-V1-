@@ -170,13 +170,25 @@ def assess(project, day, now, s):
 
 def export(root, record, revision):
     folder = root / "sessions" / record["date"] / f"v{revision:06d}"
-    atomic_write(
-        folder / "decision.json",
-        json.dumps(record, ensure_ascii=False, allow_nan=False, indent=2).encode(),
-    )
+    decision = folder / "decision.json"
+    if decision.exists():
+        if json.loads(decision.read_bytes()) != record:
+            raise ValueError(f"台帳と保存済み判定が不一致 {decision}")
+    else:
+        atomic_write(
+            decision,
+            json.dumps(
+                record, ensure_ascii=False, allow_nan=False, indent=2, sort_keys=True
+            ).encode(),
+        )
     if record["state"] == "ready":
-        csv = pd.DataFrame(record["orders"], columns=LIVE_COLUMNS).to_csv(index=False)
-        atomic_write(folder / "plan.csv", csv.encode("utf-8-sig"))
+        path = folder / "plan.csv"
+        expected = pd.DataFrame(record["orders"], columns=LIVE_COLUMNS).to_csv(index=False)
+        if path.exists():
+            if path.read_bytes() != expected.encode("utf-8-sig"):
+                raise ValueError(f"台帳と保存済み予定が不一致 {path}")
+        else:
+            atomic_write(path, expected.encode("utf-8-sig"))
 
 
 def mark_stop(project, day, now):
