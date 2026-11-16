@@ -234,6 +234,11 @@ def collect(day, settings, refresh=False):
             atomic_write(
                 root / "daily-snapshots" / iso / "last_collection.json", canonical(report).encode()
             )
+    from trading_system.research.a0_5 import after_daily
+
+    paper = after_daily(root.parent.parent, iso)
+    if paper is not None:
+        report["a0_5"] = paper
     return report
 
 

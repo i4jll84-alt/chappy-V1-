@@ -435,6 +435,23 @@ class Launcher:
         )
         status_frame = ttk.LabelFrame(frame, text="稼働状態", padding=12)
         status_frame.pack(fill="x", pady=10)
+        from trading_system.research import a0_5
+
+        strategy = ttk.Frame(status_frame)
+        strategy.pack(fill="x", pady=2)
+        self.a0_selected = tk.BooleanVar(value=a0_5.enabled(project))
+
+        def toggle_strategy():
+            try:
+                a0_5.select(project, self.a0_selected.get())
+            except (ValueError, OSError) as exc:
+                self.a0_selected.set(a0_5.enabled(project))
+                messagebox.showerror(a0_5.NAME, str(exc))
+
+        ttk.Checkbutton(
+            strategy, text=a0_5.NAME, variable=self.a0_selected, command=toggle_strategy
+        ).pack(side="left")
+        ttk.Button(strategy, text="予定・口座監査", command=self.a0_detail).pack(side="left")
         self.status = {broker: tk.StringVar() for broker in CAPTURES}
         for broker in (*RESEARCH.values(), *BROKERS):
             ttk.Label(status_frame, textvariable=self.status[broker], wraplength=710).pack(
@@ -463,6 +480,32 @@ class Launcher:
         )
         window.protocol("WM_DELETE_WINDOW", self.close)
         self.refresh()
+
+    def a0_detail(self):
+        import tkinter as tk
+        from tkinter import ttk
+        from tkinter.scrolledtext import ScrolledText
+
+        from trading_system.research.a0_5 import NAME, status
+        from trading_system.research.a0_5_view import describe
+
+        window = tk.Toplevel(self.window)
+        window.title(NAME + " ｜ 運用ガード付きペーパー")
+        body = ScrolledText(window, width=85, height=27, wrap="word", font=("Yu Gothic UI", 11))
+        body.pack(fill="both", expand=True, padx=12, pady=8)
+
+        def refresh():
+            try:
+                summary = describe(status(self.project))
+            except (ValueError, OSError) as exc:
+                summary = "口座を確認できません。" + str(exc)
+            body.configure(state="normal")
+            body.delete("1.0", "end")
+            body.insert("1.0", summary)
+            body.configure(state="disabled")
+
+        ttk.Button(window, text="更新", command=refresh).pack(pady=4)
+        refresh()
 
     def selected(self):
         return list(BROKERS) if self.mode.get() == "both" else [self.mode.get()]
@@ -498,6 +541,11 @@ class Launcher:
                 message = (
                     f"{report['date']} 保存完了（日足 {report['daily_rows']:,} 銘柄）"
                     + panel_status(report)
+                    + (
+                        f" ／ A0_5 {report['a0_5']['state']}（予定・口座監査を参照）"
+                        if "a0_5" in report
+                        else ""
+                    )
                 )
             else:
                 message = "保存を確認できません。時間をおいて再実行してください。"

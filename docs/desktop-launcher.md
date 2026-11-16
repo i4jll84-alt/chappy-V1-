@@ -21,6 +21,24 @@
 保存完了後は共通画面を閉じてよい。共通画面を開き直すと、本日分の完了記録があれば表示する。
 従来の保存スクリプトが実行中の場合も、同じ行に「保存中（別の画面から実行）」と表示する。
 
+## A0_5 順張りブレイクアウト
+
+「稼働状態」の手法名にチェックを入れると、次の当日分保存から独立した500万円の仮想口座で評価する。初期状態はオフ。「予定・口座監査」で売り予定、買い予定、決算の確認状況、受渡拘束、決済成績を確認できる。楽天・カブコムの起動やログインは不要。`data/swing-forward/STOP` と `data/a0-5-paper/STOP` を尊重する。
+
+引け判定の締切は、当日の確定日足を保存し、運用入力が揃って判定を開始した時刻。日付ごとの受領票とハッシュを保存する。新しい判定は当日中に限る。当日の判定ができなければ、画面に停止理由を表示する。有効な判定は同日再実行でも固定した版を返す。翌立会日の寄付は公式の始値と権利情報が検証できた時に照合する。日足を使用するため通常の記帳は引け後になる。
+
+ローカルプロジェクト直下での操作例。
+
+```powershell
+.\.venv\Scripts\python.exe -m trading_system.research.a0_5 status
+.\.venv\Scripts\python.exe -m trading_system.research.a0_5 preview
+.\.venv\Scripts\python.exe -m trading_system.research.a0_5 opening
+```
+
+プレビューは手法の選択や口座を変更しない。投資部門別の公式原本を更新する場合は `preview --refresh-flow`。決算原本を当日確認した場合は `confirm --code 72030 --scheduled YYYY-MM-DD --source "確認した原本"` で登録できる。買付予定日から3立会日以内の予定がないことを確認した場合は `--scheduled none`。同日中の訂正版を明示的に作る操作は `daily --revise`。訂正前の版も残る。各日の有効版は `status` で確認する。
+
+日別予定・版管理台帳は `data/a0-5-paper/`、投資部門別の追加原本は `data/a0-5-inputs/` に保存する。固定履歴再現は別コマンド `python -m trading_system.research.a0_5_replay ..\kobetutoredosutairukouann` で実行し、`data/a0-5-replay/` に出力する。[仕様と受け入れ基準](a0-5-swing-integration.md)
+
 ## 楽天証券
 
 手動で開く場合は「MARKET SPEED II」を押し、本人がログインする。
