@@ -4,6 +4,7 @@ from datetime import date, datetime, timedelta
 
 from trading_system import research_panel as panel
 from trading_system.research import paired_comparison as pc
+from trading_system.research import shared_market
 from trading_system.research.daytrade_universe import paired_symbols, panel_location
 from trading_system.research.shared_market import publish
 from trading_system.research_workbook import chart_batches
@@ -95,6 +96,32 @@ def test_both_batches_save_and_replay_separate_accounts(tmp_path):
     )
     assert all(len(v["decisions"]) == 60 for v in result["arms"].values())
     assert (tmp_path / f"data/research/paired-comparison/{day}/比較結果.txt").is_file()
+
+
+def test_kabu_publication_runs_rakuten_comparison_after_contention(tmp_path, monkeypatch):
+    day = date(2020, 11, 17)
+    roster(tmp_path / "data/rss-panel", day, 0)
+    output = tmp_path / "data/research/shared-market"
+    output.mkdir(parents=True)
+    monkeypatch.setattr(
+        shared_market, "publish", lambda project, session: output / f"{session}.sqlite"
+    )
+    monkeypatch.setattr(shared_market.time, "sleep", lambda _: None)
+    attempts = []
+
+    def compare(project, session):
+        attempts.append((project, session))
+        if len(attempts) == 1:
+            raise ValueError("broker_state_already_open")
+        return {"state": "partial"}
+
+    monkeypatch.setattr(pc, "compare", compare)
+    shared_market.after_stop(tmp_path, day, "mufg_esmart")
+    assert attempts == [(tmp_path, day), (tmp_path, day)]
+    assert json.loads((output / "comparison-status.json").read_bytes()) == {
+        "date": str(day),
+        "state": "partial",
+    }
 
 
 def test_subscribing_is_not_a_bar_sample(tmp_path, monkeypatch):
