@@ -316,7 +316,8 @@ def run(
             )
             for value in A0_5_PAPER_CAPITALS
         }
-        return {"state": "accounts", "mode": MODE, "accounts": accounts}
+        state = "stopped" if all(r["state"] == "stopped" for r in accounts.values()) else "accounts"
+        return {"state": state, "mode": MODE, "accounts": accounts}
     day = pd.Timestamp(date or now.astimezone(JST).date())
     if not preview and not enabled(project):
         return {"state": "off", "mode": MODE}

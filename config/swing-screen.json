@@ -1,0 +1,42 @@
+{
+  "version": "swing-screen-20261117-v1",
+  "display": 30,
+  "liquidity": 100000000,
+  "liquidity_window": 20,
+  "liquidity_tests": [
+    0,
+    100000000,
+    300000000
+  ],
+  "max_volume_cv": null,
+  "capital_levels": [
+    1000000,
+    3000000,
+    5000000,
+    10000000
+  ],
+  "holds": [
+    5,
+    10,
+    20
+  ],
+  "cap_yen": 1000000,
+  "position_fraction": 0.2,
+  "slots": 5,
+  "sector_slots": 2,
+  "risk_fraction": 0.01,
+  "atr_stop": 2,
+  "atr_trail": 3,
+  "fee": 10,
+  "rate": 0.0005,
+  "stress_extra": 0.001,
+  "limit_discount": 0.01,
+  "primary_capital": 3000000,
+  "primary_hold": 10,
+  "study_start": "2017-01-04",
+  "study_end": "2026-11-16",
+  "development_end": "2020-12-31",
+  "selection_end": "2023-12-31",
+  "embargo": 20,
+  "earliest_archive": "2016-10-03"
+}
