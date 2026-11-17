@@ -64,7 +64,9 @@ def main():
         markdown(metrics, cfg, out)
         write(home / "latest-result.json", dict(folder=out.name))
         return
-    if args.action == "status":
+    if args.action == "status" and (home / "STOP").is_file():
+        result = {"state": "stopped"}
+    elif args.action == "status":
         entries = sorted((home / "daily").glob("*/first.json"))
         result = load(entries[-1]) if entries else {"state": "awaiting_first_frozen_selection"}
     elif args.action == "paper":

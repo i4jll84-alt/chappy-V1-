@@ -239,11 +239,6 @@ def collect(day, settings, refresh=False):
     paper = after_daily(root.parent.parent, iso)
     if paper is not None:
         report["a0_5"] = paper
-    from trading_system.research.swing_screen.paper import after_daily as swing_screen_daily
-
-    swing = swing_screen_daily(root.parent.parent, iso)
-    if swing is not None:
-        report["swing_screen"] = swing
     return report
 
 

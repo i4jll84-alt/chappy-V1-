@@ -452,13 +452,6 @@ class Launcher:
             strategy, text=a0_5.NAME, variable=self.a0_selected, command=toggle_strategy
         ).pack(side="left")
         ttk.Button(strategy, text="予定・口座監査", command=self.a0_detail).pack(side="left")
-        from trading_system.research.swing_screen.view import show as show_swing_screen
-
-        ttk.Button(
-            strategy,
-            text="順張りスイング研究",
-            command=lambda: show_swing_screen(self.window, project),
-        ).pack(side="left")
         self.status = {broker: tk.StringVar() for broker in CAPTURES}
         for broker in (*RESEARCH.values(), *BROKERS):
             ttk.Label(status_frame, textvariable=self.status[broker], wraplength=710).pack(
