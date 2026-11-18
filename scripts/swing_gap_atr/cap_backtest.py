@@ -60,12 +60,16 @@ class Account:
     cap: int | None
     scope: str
     cash: D = START
+    initial_capital: D = field(init=False)
     realized: D = D(0)
     positions: dict = field(default_factory=dict)
     nav: list = field(default_factory=list)
     events: list = field(default_factory=list)
     trades: list = field(default_factory=list)
     exceptions: list = field(default_factory=list)
+
+    def __post_init__(self):
+        self.initial_capital = self.cash
 
     def ident(self):
         return dict(scope=self.scope, policy=self.policy, cap=self.cap or "none")
@@ -121,7 +125,7 @@ class Account:
                 cap_only=cap_only,
                 peak_positions=high,
                 realized=self.realized,
-                unrealized=equity - START - self.realized,
+                unrealized=equity - self.initial_capital - self.realized,
                 discrepancy_events=n_missing,
             )
         )
@@ -221,7 +225,7 @@ def run_day(acct, day, due_day, picks, bars, sf):
             op = positive(bars.get(c, {}).get("O"))
             if (
                 op is None
-                and acct.scope == "history_zero_recovery"
+                and acct.scope in ("history_zero_recovery", "extended_zero_recovery")
                 and (c, day) == ("14000", "2024-01-10")
             ):
                 acct.issue(day, c, "writeoff_zero_recovery", True, shares=p.shares)
@@ -342,7 +346,7 @@ def run_day(acct, day, due_day, picks, bars, sf):
         marked += cl * p.shares
         unrealized += cl * p.shares - p.debit
     acct.snapshot(day, marked, n_cap, cap_only, high, len(acct.exceptions) - start_issues)
-    assert abs(acct.nav[-1]["nav"] - (START + acct.realized + unrealized)) < TOL
+    assert abs(acct.nav[-1]["nav"] - (acct.initial_capital + acct.realized + unrealized)) < TOL
 
 
 def metrics(acct, through, period):
@@ -350,10 +354,11 @@ def metrics(acct, through, period):
     if not rows:
         return None
     last, first = rows[-1], rows[0]
-    high = START
+    capital = acct.initial_capital
+    high = capital
     dd = D(0)
     returns = []
-    prev = START
+    prev = capital
     for i, r in enumerate(rows):
         nav = r["nav"]
         high = max(high, nav)
@@ -361,8 +366,8 @@ def metrics(acct, through, period):
         if i:
             returns.append(float(nav / prev - 1))
         prev = nav
-    net = last["nav"] - START
-    cagr = float(last["nav"] / START) ** (252 / len(rows)) - 1
+    net = last["nav"] - capital
+    cagr = float(last["nav"] / capital) ** (252 / len(rows)) - 1
     counters = Counter(e["action"] for e in acct.events if e["date"] <= through)
     skips = Counter(
         e["reason"] for e in acct.events if e["action"] == "SKIP" and e["date"] <= through
@@ -376,10 +381,10 @@ def metrics(acct, through, period):
         days=len(rows),
         nav=last["nav"],
         net=net,
-        total_return_pct=net * 100 / START,
+        total_return_pct=net * 100 / capital,
         cagr_pct=cagr * 100,
         annual_return_intervals=len(returns),
-        cagr_intervals_pct=100 * (float(last["nav"] / START) ** (252 / len(returns)) - 1)
+        cagr_intervals_pct=100 * (float(last["nav"] / capital) ** (252 / len(returns)) - 1)
         if returns
         else None,
         max_dd_pct=dd * 100,
@@ -424,12 +429,17 @@ def main():
     p.add_argument("--project", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--caps", default="5,8,10,none")
+    p.add_argument("--initial-capital", type=int, default=int(START), help="Starting cash in yen")
     p.add_argument("--cash-policy", choices=("morning", "reserved", "both"), default="both")
     args = p.parse_args()
+    if args.initial_capital <= 0:
+        p.error("initial capital must be positive")
+    initial_capital = D(args.initial_capital)
     project = args.project.resolve()
     sys.path.insert(0, str(project / "src"))
     sys.path.insert(0, str(project / "scripts/swing_gap_atr"))
     import continuous as source
+
     from trading_system.research import swing_forward as sf
 
     caps = [None if s.lower() == "none" else int(s) for s in args.caps.split(",")]
@@ -450,13 +460,15 @@ def main():
     last_i = market.indices[max(all_ranks)]
     assert list(all_ranks) == market.sessions[first_i : last_i + 1]
     accts = [
-        Account(pol, cap, scope)
+        Account(pol, cap, scope, cash=initial_capital)
         for scope in ("history", "november")
         for pol in policies
         for cap in caps
     ]
     if None in caps:
-        accts.extend(Account(pol, None, "history_zero_recovery") for pol in policies)
+        accts.extend(
+            Account(pol, None, "history_zero_recovery", cash=initial_capital) for pol in policies
+        )
     frozen = []
     first_dates = {"history": min(ranks), "november": min(nov), "history_zero_recovery": min(ranks)}
     for a in accts:
@@ -588,6 +600,7 @@ def main():
     if sensitivity:
         save("zero_recovery", sensitivity)
     proof = dict(
+        initial_capital=args.initial_capital,
         archive_signals=len(ranks),
         november_signals=len(nov),
         credit=credits,
