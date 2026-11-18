@@ -215,9 +215,7 @@ def mark_stop(project, day, now):
 def opening(project, now=None, capital=None):
     now = now or datetime.now(JST)
     if capital is None:
-        accounts = {
-            str(value): opening(project, now, value) for value in A0_5_PAPER_CAPITALS
-        }
+        accounts = {str(value): opening(project, now, value) for value in A0_5_PAPER_CAPITALS}
         states = {row["state"] for row in accounts.values()}
         state = (
             "stopped"
@@ -295,9 +293,7 @@ def apply_openings(project, s, through, now, capital=A0_5.capital):
     return s
 
 
-def run(
-    project, date=None, *, now=None, preview=False, refresh=False, revise=False, capital=None
-):
+def run(project, date=None, *, now=None, preview=False, refresh=False, revise=False, capital=None):
     now = now or datetime.now(JST)
     if capital is None:
         if refresh:
@@ -389,9 +385,7 @@ def after_daily(project, date):
             "state": "accounts",
             "accounts": {
                 capital: {
-                    k: value[k]
-                    for k in ("state", "date", "order_date", "reason")
-                    if k in value
+                    k: value[k] for k in ("state", "date", "order_date", "reason") if k in value
                 }
                 for capital, value in r["accounts"].items()
             },
@@ -409,9 +403,7 @@ def after_daily(project, date):
 def status(project, now=None, capital=None):
     now = now or datetime.now(JST)
     if capital is None:
-        accounts = {
-            str(value): status(project, now, value) for value in A0_5_PAPER_CAPITALS
-        }
+        accounts = {str(value): status(project, now, value) for value in A0_5_PAPER_CAPITALS}
         return dict(
             strategy=NAME,
             mode=MODE,

@@ -915,3 +915,7 @@ RSS監査は `attention_required`。過去の異常観測2,503件
 .venv/Scripts/ruff.exe format --check --no-cache .
 git diff --check
 ```
+
+## 11月18日・A0_5の回帰検査と書式整備
+
+A0_5の既存ルール・ペーパー口座・保存出力に関する固定テストを実行し、30件とサブテスト8件が成功。ruff check と対象3ファイルの format --check も成功した。既存の実装・テスト2ファイルは書式のみ整形し、売買ロジックは変更していない。

@@ -127,8 +127,7 @@ def test_off_on_existing_four_books_and_no_broker_calls(tmp_path, monkeypatch):
     (path.parent / "STOP").touch()
     assert a0_5.run(tmp_path, now=NOW)["state"] == "stopped"
     assert all(
-        account["decision"] is None
-        for account in a0_5.status(tmp_path, NOW)["accounts"].values()
+        account["decision"] is None for account in a0_5.status(tmp_path, NOW)["accounts"].values()
     )
     (path.parent / "STOP").unlink()
 
