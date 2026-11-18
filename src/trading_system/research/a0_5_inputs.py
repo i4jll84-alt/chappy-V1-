@@ -296,15 +296,24 @@ def read_inputs(project, day, cutoff):
 
 
 def schedules(project, codes, day, cutoff, manual):
-    meta, events = swing_earnings.asof(project / "data/swing-forward", cutoff)
+    root = project / "data/swing-forward"
+    meta, events = swing_earnings.asof(root, cutoff)
+    preopen = day.date() < cutoff.date() and cutoff.hour < 9
+    if preopen and meta.get("reason") == "no_snapshot_by_cutoff":
+        end_of_signal_day = datetime.combine(day.date(), datetime.max.time(), cutoff.tzinfo)
+        meta, events = swing_earnings.asof(root, end_of_signal_day)
     ref = {
         "source": meta.get("manifest"),
         "sha256": meta.get("manifest_sha256"),
-        "checked_on": iso(day),
+        "checked_on": (meta.get("available_at") or iso(day))[:10],
+        "available_at": meta.get("available_at"),
     }
     result = {}
     for code in codes:
         override = manual.get(iso(day), {}).get(code)
+        morning = manual.get(cutoff.date().isoformat(), {}).get(code) if preopen else None
+        if morning and datetime.fromisoformat(morning["received_at"]) <= cutoff:
+            override = morning
         if override and datetime.fromisoformat(override["received_at"]) <= cutoff:
             result[code] = (override["scheduled_date"], "手動確認 " + override["source"])
             continue

@@ -1,0 +1,161 @@
+import json
+import sys
+from datetime import datetime
+from types import SimpleNamespace
+
+import pytest
+
+from trading_system import plan_forward, plan_startup
+from trading_system.brokers.locking import single_writer
+from trading_system.research import swing_forward
+
+
+def test_morning_recovers_before_both_forward_and_legacy_decisions(tmp_path, monkeypatch, capsys):
+    calls = []
+    target = "2026-11-19"
+
+    def recover(project, *, now, on_a_inputs):
+        calls.append("fetch")
+        return {"status": "attention", "target": target}
+
+    def due(project, *, now, recovery_signal):
+        assert project == tmp_path and recovery_signal == target
+        calls.append("plans")
+        return {"status": "ok", "plans": {"A": {}, "B": {}}}
+
+    def supplemental(project, day, *, now):
+        assert day == target
+        calls.append("supplemental")
+        return {"status": "ok"}
+
+    def legacy(project, action, answer):
+        calls.append("legacy")
+        return {"state": "frozen"}
+
+    monkeypatch.setattr(plan_startup.plan_recovery, "recover", recover)
+    monkeypatch.setattr(plan_startup.plan_recovery, "recover_supplemental", supplemental)
+    monkeypatch.setattr(plan_startup, "run_due", due)
+    monkeypatch.setattr(swing_forward, "run", legacy)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["swing_forward", "morning"])
+    assert swing_forward.main() == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["state"] == "frozen" and report["evening_recovery"]["status"] == "attention"
+    assert calls == ["fetch", "plans", "legacy", "supplemental"]
+
+
+def test_one_startup_at_a_time_and_retry_after_process_exit(tmp_path, monkeypatch):
+    root = tmp_path / "data/plan-forward/recovery/dispatch"
+    with single_writer(root):
+        assert plan_startup.run_startup(tmp_path)["status"] == "busy"
+
+    def fail(*args, **kwargs):
+        raise ValueError("private provider argument")
+
+    monkeypatch.setattr(plan_startup.plan_recovery, "recover", fail)
+    monkeypatch.setattr(plan_startup, "run_due", lambda *a, **k: {"status": "ok"})
+    assert plan_startup.run_startup(tmp_path) == {
+        "recovery": {"status": "error", "error_type": "ValueError"},
+        "plan_forward": {"status": "ok"},
+        "status": "error",
+    }
+
+
+def test_morning_result_is_recorded_before_supplemental_reports(tmp_path, monkeypatch):
+    day, entry = "2026-11-19", "2026-11-20"
+    events = []
+
+    def inputs(*args, **kwargs):
+        return {"status": "ok", "target": day, "next_session": entry}
+
+    def record(project, report, *, now):
+        assert report["recovery"]["target"] == day
+        assert report["plan_forward"]["plans"]["B"]["status"] == "ready"
+        events.append("read_decisions")
+        return {"state": "met", "target": entry}
+
+    def supplemental(*args, **kwargs):
+        events.append("reports")
+        return {"status": "ok"}
+
+    monkeypatch.setattr(plan_startup.plan_recovery, "recover", inputs)
+    monkeypatch.setattr(plan_startup.plan_recovery, "recover_supplemental", supplemental)
+    monkeypatch.setattr(plan_startup, "record_startup", record)
+    monkeypatch.setattr(
+        plan_startup, "run_due", lambda *a, **k: {"plans": {"B": {"status": "ready"}}}
+    )
+    report = plan_startup.run_startup(tmp_path)
+    assert report["morning_check"]["target"] == entry
+    assert events == ["read_decisions", "reports"]
+
+
+def test_registry_calls_preopen_adapter_only_for_eligible_pending_session(tmp_path, monkeypatch):
+    plan = {
+        "id": "B",
+        "name": "B",
+        "stage": "active",
+        "adapter": "test_b",
+        "version": "1",
+        "start": "2026-11-19",
+        "capital": 3000000,
+    }
+    monkeypatch.setattr(plan_forward, "catalog", lambda project: [plan])
+    calls = []
+
+    def recover(project, book, *, signal_date, start, capital, now):
+        calls.append(signal_date)
+        return {"state": "ready"}
+
+    module = SimpleNamespace(
+        recover_morning=recover,
+        advance=lambda *a, **k: dict(status="ready", initial_capital=3000000),
+    )
+    monkeypatch.setattr(plan_forward.importlib, "import_module", lambda _: module)
+    now = datetime(2026, 11, 20, 8, tzinfo=plan_forward.JST)
+    for target in [None, "2026-11-18", "2026-11-20", "2026-11-19"]:
+        result = plan_forward.run_due(tmp_path, now=now, recovery_signal=target)
+        assert result["status"] == "ok"
+    assert calls == ["2026-11-19"]
+    assert result["plans"]["B"]["morning_recovery"] == {"state": "ready"}
+
+
+def test_catch_up_cli_preserves_attention_and_legacy_failures(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(plan_startup, "run_startup", lambda *a, **k: {"status": "attention"})
+    assert plan_forward.main(["--project", str(tmp_path), "--catch-up"]) == 2
+    assert json.loads(capsys.readouterr().out)["status"] == "attention"
+    calls = []
+    monkeypatch.setattr(plan_startup, "finish_startup", lambda *a, **k: calls.append("finished"))
+    monkeypatch.setattr(sys, "argv", ["swing_forward", "morning"])
+    monkeypatch.chdir(tmp_path)
+
+    def legacy(*a):
+        raise RuntimeError("legacy failure")
+
+    monkeypatch.setattr(swing_forward, "run", legacy)
+    with pytest.raises(RuntimeError, match="legacy failure"):
+        swing_forward.main()
+    assert calls == ["finished"]
+
+
+def test_2010_desktop_cli_and_codex_share_one_entrypoint(tmp_path, monkeypatch, capsys):
+    calls = []
+
+    def shared(project):
+        calls.append(project)
+        return {"status": "ok", "state": "evening"}
+
+    monkeypatch.setitem(
+        sys.modules, "trading_system.plan_evening", SimpleNamespace(run_evening=shared)
+    )
+    monkeypatch.setattr(
+        swing_forward,
+        "datetime",
+        SimpleNamespace(now=lambda tz: datetime(2026, 11, 19, 20, 10, tzinfo=tz)),
+    )
+    monkeypatch.chdir(tmp_path)
+    assert plan_forward.main(["--project", str(tmp_path), "--evening-check"]) == 0
+    first = json.loads(capsys.readouterr().out)
+    monkeypatch.setattr(sys, "argv", ["swing_forward", "evening"])
+    assert swing_forward.main() == 0
+    assert first == json.loads(capsys.readouterr().out)
+    assert calls == [tmp_path, tmp_path]

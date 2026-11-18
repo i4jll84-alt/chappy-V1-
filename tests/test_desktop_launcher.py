@@ -203,6 +203,8 @@ def research_view(tmp_path, mode):
     "state", ["rakuten_already_running", "kabu_check_running", "rakuten_spawn_failed"]
 )
 def test_both_research_reports_each_selected_result(tmp_path, monkeypatch, state):
+    when = datetime.fromisoformat("2026-11-04T09:30:00+09:00")
+    monkeypatch.setattr(launcher, "time_ns", lambda: int(when.timestamp() * 1e9))
     view = research_view(tmp_path, "both")
     if state == "rakuten_already_running":
         view.children["panel"] = Mock()
@@ -256,14 +258,26 @@ def test_launcher_buttons_use_selection_for_research_and_connection(tmp_path, mo
         assert opened == [view.workbook, book]
         check.assert_not_called()
         study.assert_not_called()
-        research_buttons = [label for label in buttons if "研究取得" in label]
-        assert research_buttons == ["選択した証券会社の研究取得"]
-        assert "選択した証券会社を開始" not in buttons
+        program = Mock()
+        monkeypatch.setattr(view.plan_dashboard, "start", program)
+        notebook = view.plan_dashboard.notebook
+        notebook.select(notebook.tabs()[-1])
+        broker_program = next(
+            w
+            for w in widgets
+            if isinstance(w, ttk.Button)
+            and w.cget("text") == "プログラム起動"
+            and w.master == buttons["証券データ取得"].master
+        )
+        broker_program.invoke()
+        assert notebook.select() == str(view.plan_dashboard.frame)
+        program.assert_called_once()
+        study.assert_not_called()
         next(
             w for w in widgets if isinstance(w, ttk.Radiobutton) and w.cget("text") == "両方"
         ).invoke()
         assert view.selected() == list(launcher.BROKERS)
-        buttons[research_buttons[0]].invoke()
+        buttons["証券データ取得"].invoke()
         study.assert_called_once()
         check.assert_not_called()
         buttons["接続を確認（トヨタ1銘柄）"].invoke()

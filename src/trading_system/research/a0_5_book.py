@@ -31,6 +31,14 @@ def initial(capital=A0_5.capital):
     )
 
 
+def revision_digest(db_path, revision):
+    with closing(sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True)) as db:
+        row = db.execute("SELECT body FROM revisions WHERE revision=?", (revision,)).fetchone()
+    if row is None:
+        raise ValueError("Bプラン開始時のA0-5台帳の版を確認できません")
+    return hashlib.sha256(row[0].encode("utf-8")).hexdigest()
+
+
 def load(root, capital=A0_5.capital):
     path = root / "ledger.sqlite"
     if not path.is_file():

@@ -1,6 +1,6 @@
 import json
 import sys
-from datetime import date
+from datetime import date, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -13,14 +13,17 @@ def fake_runner(monkeypatch, due):
     monkeypatch.setitem(sys.modules, "trading_system.plan_forward", SimpleNamespace(run_due=due))
 
 
-@pytest.mark.parametrize(
-    "action,expected", [("morning", True), ("evening", True), ("review", False)]
-)
+@pytest.mark.parametrize("action,expected", [("evening", True), ("review", False)])
 def test_existing_heartbeat_advances_after_legacy_job(
     monkeypatch, capsys, tmp_path, action, expected
 ):
     calls = []
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        swing_forward,
+        "datetime",
+        SimpleNamespace(now=lambda tz: datetime(2026, 11, 19, 19, 0, tzinfo=tz)),
+    )
     monkeypatch.setattr(sys, "argv", ["swing_forward", action])
 
     def legacy(project, name, answer):

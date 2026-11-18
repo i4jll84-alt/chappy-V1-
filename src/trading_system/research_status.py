@@ -135,7 +135,7 @@ def terminal_guidance(state, reason):
     if reason == "stop_or_cutoff":
         return "開始前に停止または受付終了。次の取得時間に開始してください。"
     if reason == "collector_already_active":
-        return "別の取得が実行中です。終了後に研究取得ボタンを押してください。"
+        return "別の取得が実行中です。終了後に「証券データ取得」を押してください。"
     if reason == "daytime_1600":
         return "16時終了・保存完了。操作は不要です。"
     if state == "stopped" and reason == "one_pass_complete":

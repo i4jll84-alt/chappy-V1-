@@ -4,10 +4,11 @@ import argparse
 import importlib
 import json
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from html import escape
 from pathlib import Path
+from time import monotonic
 from zoneinfo import ZoneInfo
 
 from trading_system.brokers.locking import single_writer
@@ -140,13 +141,20 @@ td:first-child,th:first-child{{text-align:left}}th{{background:#eff4f6}}div{{ove
     atomic_write(root / "summary.html", html.encode(), sharing_retries=3)
 
 
-def run_due(project, *, now=None):
+def run_due(project, *, now=None, recovery_signal=None):
     project = Path(project).resolve()
     realtime = now is None
     now = now or datetime.now(JST)
+    started = monotonic()
     if now.utcoffset() is None:
         raise ValueError("timezone required")
     now = now.astimezone(JST)
+
+    def current_time():
+        if realtime:
+            return datetime.now(JST)
+        return now + timedelta(seconds=monotonic() - started)
+
     root = project / "data/plan-forward"
     plans = catalog(project)
     try:
@@ -167,12 +175,33 @@ def run_due(project, *, now=None):
                     else:
                         save(enrollment, {"spec": spec, "registered_at": now.isoformat()})
                     adapter = importlib.import_module(RESEARCH_PACKAGE + plan["adapter"])
+                    recover_plan = getattr(adapter, "recover_morning", None)
+                    current = current_time()
+                    if (
+                        recover_plan is not None
+                        and recovery_signal
+                        and plan["start"] <= recovery_signal < current.date().isoformat()
+                    ):
+                        try:
+                            row["morning_recovery"] = recover_plan(
+                                project,
+                                book,
+                                signal_date=recovery_signal,
+                                start=plan["start"],
+                                capital=plan["capital"],
+                                now=current,
+                            )
+                        except Exception as exc:
+                            row["morning_recovery"] = {
+                                "state": "error",
+                                "error_type": type(exc).__name__,
+                            }
                     snapshot = adapter.advance(
                         project,
                         book,
                         start=plan["start"],
                         capital=plan["capital"],
-                        now=datetime.now(JST) if realtime else now,
+                        now=current_time(),
                     )
                     if (
                         not snapshot.get("status")
@@ -189,11 +218,21 @@ def run_due(project, *, now=None):
                         else type(exc).__name__
                     )
                     row = {"name": plan["name"], **spec, "status": "error", "issue": reason}
-                if row["status"] == "error":
+                if (
+                    row["status"] == "error"
+                    or row.get("morning_recovery", {}).get("state") == "error"
+                ):
                     report["status"] = "error"
                 elif (
                     row["status"]
-                    in ("blocked", "needs_review", "stopped", "disabled", "missing_native_decision")
+                    in (
+                        "blocked",
+                        "needs_review",
+                        "stopped",
+                        "disabled",
+                        "missing_native_decision",
+                        "missed_preopen",
+                    )
                     and report["status"] == "ok"
                 ):
                     report["status"] = "attention"
@@ -211,11 +250,19 @@ def run_due(project, *, now=None):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     actions = parser.add_mutually_exclusive_group(required=True)
-    for action in ("due", "status", "list"):
+    for action in ("due", "status", "list", "catch-up", "evening-check"):
         actions.add_argument("--" + action, action="store_true")
     parser.add_argument("--project", type=Path, default=Path(__file__).resolve().parents[2])
     opts = parser.parse_args(argv)
-    if opts.due:
+    if opts.evening_check:
+        from trading_system.plan_evening import run_evening
+
+        result = run_evening(opts.project)
+    elif opts.catch_up:
+        from trading_system.plan_startup import run_startup
+
+        result = run_startup(opts.project)
+    elif opts.due:
         result = run_due(opts.project)
     elif opts.list:
         result = {"plans": catalog(opts.project)}

@@ -126,7 +126,7 @@ def test_one_click_collects_while_other_login_pending(tmp_path, monkeypatch, wai
             w for w in widgets if isinstance(w, ttk.Radiobutton) and w.cget("text") == "両方"
         ).invoke()
         next(
-            w for w in widgets if isinstance(w, ttk.Button) and "研究取得" in w.cget("text")
+            w for w in widgets if isinstance(w, ttk.Button) and w.cget("text") == "証券データ取得"
         ).invoke()
         if waiting == "rakuten":
             until(

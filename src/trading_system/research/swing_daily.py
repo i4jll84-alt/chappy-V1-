@@ -123,7 +123,7 @@ def snapshot(root, day, client, refresh=False, expected_codes=None):
     return path, count
 
 
-def collect(day, settings, refresh=False):
+def collect(day, settings, refresh=False, *, run_paper=True):
     now = datetime.now(JST)
     if day > now.date() or (day == now.date() and now.time() < time(16, 30)):
         raise ValueError("daily_data_after_1630_only")
@@ -206,6 +206,10 @@ def collect(day, settings, refresh=False):
             ):
                 report["completed_at"] = old["completed_at"]
         atomic_write(receipt, canonical(report).encode())
+        if not run_paper:
+            # Morning recovery advances both plans before building the optional intraday panel.
+            wait_for_daily_pages(path)
+            return report
         from trading_system.research.daytrade_universe import prepare
 
         panel_root = root.parent / "rss-panel"

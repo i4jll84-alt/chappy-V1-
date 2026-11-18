@@ -222,7 +222,7 @@ def research_result(project, requested_ns=0, broker="panel"):
         if reason == "close_daily_book_manually":
             return f"前回 {stamp:%m/%d %H:%M}：当日用の研究ブックを閉じてください。"
         if broker == "kabu_panel" or data["state"] == "not_started":
-            detail = guidance or "停止。再開するには研究取得ボタンを押してください。"
+            detail = guidance or "停止。再開するには「証券データ取得」を押してください。"
             if reason == "one_pass_complete":
                 detail += f" 有効な板 {data.get('symbols_with_book', 0)}/31銘柄。"
             return f"前回 {stamp:%m/%d %H:%M}：{detail}"
@@ -248,7 +248,7 @@ def research_result(project, requested_ns=0, broker="panel"):
         if data["state"] in {"stopped", "needs_review"}:
             detail += panel_bar_dates(data)
         if reason == "manual_stop":
-            detail += "。再開するには研究取得ボタンを押してください。"
+            detail += "。再開するには「証券データ取得」を押してください。"
         elif reason == "daytime_1600":
             detail += "。16時の定時終了です。"
         return f"前回 {stamp:%m/%d %H:%M}：{detail}"
@@ -365,20 +365,40 @@ class Launcher:
                 messagebox.showwarning(
                     "設定", "保存済み設定を読み込めません。初期設定を表示します。"
                 )
-        window.title("個別株ツール — 楽天証券・カブコム 共通起動")
-        window.geometry("860x720")
+        window.title("個別株ツール — A・Bプランとデータ取得")
+        window.geometry("960x740")
         window.minsize(820, 700)
         window.option_add("*Font", ("Yu Gothic UI", 11))
         style = ttk.Style(window)
         style.theme_use("clam")
         style.configure("TButton", padding=(12, 8))
         style.configure("Title.TLabel", font=("Yu Gothic UI", 20, "bold"))
-        frame = ttk.Frame(window, padding=(24, 16))
-        frame.pack(fill="both", expand=True)
+        from trading_system.plan_dashboard import PlanDashboard
+
+        notebook = ttk.Notebook(window)
+        notebook.pack(fill="both", expand=True)
+        self.plan_dashboard = PlanDashboard(notebook, project, lock_active)
+        broker_tab = ttk.Frame(notebook)
+        notebook.add(broker_tab, text="証券会社・データ取得")
+        canvas = tk.Canvas(broker_tab, highlightthickness=0)
+        scroll = ttk.Scrollbar(broker_tab, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scroll.set)
+        scroll.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        frame = ttk.Frame(canvas, padding=(24, 12))
+        panel_id = canvas.create_window(0, 0, window=frame, anchor="nw")
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(panel_id, width=e.width))
+        frame.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+
+        def scroll_brokers(event):
+            if notebook.select() == str(broker_tab):
+                canvas.yview_scroll(-int(event.delta / 120), "units")
+
+        window.bind("<MouseWheel>", scroll_brokers, add=True)
         ttk.Label(frame, text="個別株データ取得", style="Title.TLabel").pack(anchor="w")
         ttk.Label(
             frame,
-            text="「両方」を選んで研究取得を押すと、両社のアプリと取得が起動します。",
+            text="「証券データ取得」は、選択した証券会社のアプリを開いてデータを記録します。",
         ).pack(anchor="w", pady=(4, 8))
         selection = ttk.LabelFrame(frame, text="対象の証券会社", padding=12)
         selection.pack(fill="x")
@@ -417,7 +437,12 @@ class Launcher:
         actions.pack(fill="x")
         ttk.Button(
             actions,
-            text="選択した証券会社の研究取得",
+            text="プログラム起動",
+            command=self.plan_dashboard.open_program,
+        ).pack(side="left", padx=(0, 10))
+        ttk.Button(
+            actions,
+            text="証券データ取得",
             command=self.start_research,
         ).pack(side="left", padx=(0, 10))
         ttk.Button(actions, text="すべての取得を停止", command=self.stop_all).pack(side="left")
@@ -449,7 +474,10 @@ class Launcher:
                 messagebox.showerror(a0_5.NAME, str(exc))
 
         ttk.Checkbutton(
-            strategy, text=a0_5.NAME, variable=self.a0_selected, command=toggle_strategy
+            strategy,
+            text=f"Bプラン / {a0_5.NAME}",
+            variable=self.a0_selected,
+            command=toggle_strategy,
         ).pack(side="left")
         ttk.Button(strategy, text="予定・口座監査", command=self.a0_detail).pack(side="left")
         self.status = {broker: tk.StringVar() for broker in CAPTURES}
@@ -465,8 +493,8 @@ class Launcher:
         ttk.Label(
             frame,
             text=(
-                "研究取得では楽天の分足・気配、カブコムの板を記録します。楽天の研究用Excelは自動で開きます。\n"
-                "場中の継続取得は16時で終了。引け後の研究ボタンは市況を一度読み取ります。\n"
+                "証券データ取得では楽天の分足・気配、カブコムの板を記録します。楽天の研究用Excelは自動で開きます。\n"
+                "場中の継続取得は16時で終了。引け後の証券データ取得は市況を一度読み取ります。\n"
                 "現在は取得・ペーパートレード用です。実発注は無効です。"
             ),
             wraplength=740,
@@ -768,13 +796,13 @@ class Launcher:
                     continue
                 if source == "mufg_esmart" and not self.busy(broker) and self.busy(source):
                     self.start_notes[broker] = (
-                        "接続確認中。終了後に研究取得ボタンを押してください。"
+                        "接続確認中。終了後に「証券データ取得」を押してください。"
                     )
                     continue
                 self.stopping.discard(broker)
                 if datetime.fromtimestamp(requested / 1e9, ZoneInfo("Asia/Tokyo")).hour < 6:
                     self.start_notes[broker] = (
-                        "開始時間外。6:00以降に研究取得ボタンを押してください。"
+                        "開始時間外。6:00以降に「証券データ取得」を押してください。"
                     )
                     continue
                 key = "rakuten_app" if source == "rakuten" else "mufg_app"
@@ -811,7 +839,7 @@ class Launcher:
                 continue
             except subprocess.TimeoutExpired:
                 self.start_notes[broker] = (
-                    "証券アプリの起動確認が時間切れです。少し待って研究取得を押してください。"
+                    "証券アプリの起動確認が時間切れです。少し待って「証券データ取得」を押してください。"
                 )
                 continue
             try:
@@ -819,7 +847,7 @@ class Launcher:
                     continue
                 if broker == "kabu_panel" and self.busy("mufg_esmart"):
                     self.start_notes[broker] = (
-                        "接続確認中。終了後に研究取得ボタンを押してください。"
+                        "接続確認中。終了後に「証券データ取得」を押してください。"
                     )
                     continue
                 self.launch_research(broker, requested, late)
@@ -996,7 +1024,7 @@ class Launcher:
                         if detail:
                             text = detail
                         elif child is None:
-                            text = "停止中。開始するには研究取得ボタンを押してください。"
+                            text = "停止中。開始するには「証券データ取得」を押してください。"
                     if broker in self.vendor_tasks:
                         if not active:
                             text = "証券アプリを起動確認中。お待ちください。"

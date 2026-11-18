@@ -251,6 +251,9 @@ def advance(project: Path, book: Path, *, start: str, capital: int, now: datetim
             next_entry=target,
             picks=(decision or {}).get("picks", []),
             decision_status=(decision or {}).get("status"),
+            decision_origin=(decision or {}).get("decision_origin"),
+            decision_cutoff=(decision or {}).get("cutoff"),
+            decision_recorded_at=(decision or {}).get("recorded_at"),
             issue=issue,
         )
 
@@ -296,8 +299,17 @@ def advance(project: Path, book: Path, *, start: str, capital: int, now: datetim
                 else:
                     try:
                         decision = prepare(project, signal, target, due, cutoff)
+                        decision["decision_origin"] = "evening_inputs"
                     except INPUT_ERRORS as exc:
                         failure = str(exc)
+                        retry_at = stamp()
+                        if current.date().isoformat() == target and cutoff < retry_at < deadline:
+                            try:
+                                decision = prepare(project, signal, target, due, retry_at)
+                                decision["decision_origin"] = "morning_recovery"
+                                decision["original_cutoff"] = cutoff.isoformat()
+                            except INPUT_ERRORS as retry_exc:
+                                failure = str(retry_exc)
                 if decision is None and stamp() < deadline:
                     return status("waiting_inputs", target, issue=failure)
             frozen_at = stamp()

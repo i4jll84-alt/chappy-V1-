@@ -1,9 +1,6 @@
 """Forward comparison view of an existing, isolated A0-5 paper account."""
 
-import hashlib
 import json
-import sqlite3
-from contextlib import closing
 from datetime import datetime, time
 from pathlib import Path
 
@@ -14,14 +11,6 @@ from . import a0_5 as native
 from . import a0_5_book as ledger
 
 
-def _revision_digest(db_path, revision):
-    with closing(sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True)) as db:
-        row = db.execute("SELECT body FROM revisions WHERE revision=?", (revision,)).fetchone()
-    if row is None:
-        raise ValueError("Bプラン開始時のA0-5台帳の版を確認できません")
-    return hashlib.sha256(row[0].encode("utf-8")).hexdigest()
-
-
 def _checkpoint(path, native_db, state, start, capital, now, calendar):
     if path.is_file():
         bound = json.loads(path.read_bytes())
@@ -30,7 +19,7 @@ def _checkpoint(path, native_db, state, start, capital, now, calendar):
             or bound["initial_capital"] != capital
             or bound["native_revision"] > state["revision"]
             or bound["native_revision_sha256"]
-            != _revision_digest(native_db, bound["native_revision"])
+            != ledger.revision_digest(native_db, bound["native_revision"])
         ):
             raise ValueError("Bプランの開始記録と参照先のA0-5台帳が一致しません")
         return bound
@@ -59,11 +48,23 @@ def _checkpoint(path, native_db, state, start, capital, now, calendar):
         "first_entry": calendar[calendar.get_loc(first) + 1].date().isoformat(),
         "registered_at": now.isoformat(),
         "native_revision": state["revision"],
-        "native_revision_sha256": _revision_digest(native_db, state["revision"]),
+        "native_revision_sha256": ledger.revision_digest(native_db, state["revision"]),
         "journal_offset": len(state["journal"]),
     }
     atomic_write(path, json.dumps(bound, indent=2, ensure_ascii=False).encode())
     return bound
+
+
+def recover_morning(project: Path, book: Path, *, signal_date, start, capital, now):
+    """Allow the comparison runner to resume the selected native B account under its own lock."""
+    if str(signal_date)[:10] < start:
+        return {"state": "outside_comparison", "date": str(signal_date)[:10]}
+    anchor = book / "baseline.json"
+    if not anchor.is_file():
+        return {"state": "not_started", "date": str(signal_date)[:10]}
+    if json.loads(anchor.read_bytes())["start"] != start:
+        raise ValueError("Bプラン開始日の不一致")
+    return native.recover_morning(project, signal_date, now=now, capital=capital, anchor=anchor)
 
 
 def advance(project: Path, book: Path, *, start: str, capital: int, now: datetime) -> dict:
@@ -118,7 +119,10 @@ def advance(project: Path, book: Path, *, start: str, capital: int, now: datetim
         "last_mark": mark.get("date"),
         "last_decision": last.get("date"),
         "decision_state": last.get("state"),
-        "reason": last.get("reason") if status == "blocked" else None,
+        "reason": last.get("reason"),
+        "decision_origin": last.get("decision_origin"),
+        "decision_cutoff": last.get("cutoff"),
+        "decision_recorded_at": last.get("recorded_at"),
         "next_entry": next_entry,
         "first_entry": bound["first_entry"],
         "candidates": len(last["candidates"]) if "candidates" in last else None,

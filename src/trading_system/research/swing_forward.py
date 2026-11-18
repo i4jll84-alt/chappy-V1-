@@ -13,7 +13,7 @@ import httpx
 
 from trading_system.brokers.locking import single_writer
 from trading_system.data_sources.jquants import APIError
-from trading_system.plan_forward_hook import run_scheduled
+from trading_system.plan_forward_hook import run_morning, run_scheduled
 from trading_system.research import swing_earnings as earnings
 from trading_system.research import swing_macro as macro
 from trading_system.research import swing_shorts as shorts
@@ -769,7 +769,15 @@ def main():
     p.add_argument("--answer", type=Path)
     args = p.parse_args()
     project = Path.cwd()
-    if args.action in {"morning", "evening"}:
+    if args.action == "morning":
+        result = run_morning(project, lambda: run(project, args.action, args.answer))
+    elif args.action == "evening" and datetime.now(JST).time() >= time(20, 10):
+        from trading_system.plan_evening import run_evening
+
+        result = run_evening(project)
+        print(canonical(result))
+        return int(result.get("status") in ("error", "attention"))
+    elif args.action == "evening":
         result = run_scheduled(project, lambda: run(project, args.action, args.answer))
     else:
         result = run(project, args.action, args.answer)

@@ -3,8 +3,9 @@
 import argparse
 import json
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, time, timedelta
 from pathlib import Path
+from time import monotonic
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -80,10 +81,16 @@ def manual_schedule(project, code, scheduled, source, now):
             book.save(root, s)
 
 
-def assess(project, day, now, s):
-    if day.date() != now.astimezone(JST).date():
+def assess(project, day, now, s, *, preopen_target=None):
+    if preopen_target is None and day.date() != now.astimezone(JST).date():
         raise ValueError("過去日の引け判定は保存済みの版を参照してください")
     history, cal, counts, refs = inputs.read_inputs(project, day, now)
+    if preopen_target is not None and (
+        iso(cal[cal.get_loc(day) + 1]) != preopen_target
+        or now.astimezone(JST).date().isoformat() != preopen_target
+        or now.astimezone(JST).time() >= time(9)
+    ):
+        raise ValueError("寄付前の対象立会日と選定日が一致しません")
     ranked = ranked_candidates(history)
     codes = set(ranked.Code) | {p["Code"] for p in s["positions"]}
     schedule, schedule_ref = inputs.schedules(project, codes, day, now, s["manual"])
@@ -281,8 +288,10 @@ def apply_openings(project, s, through, now, capital=A0_5.capital):
         else:
             prices, refs = {}, []
         pre = project / "data/swing-forward/sessions" / date / "preopen.json"
-        skipped = (root_for(project) / "stops" / (date + ".json")).is_file() or (
-            pre.is_file() and json.loads(pre.read_bytes()).get("stopped") is True
+        skipped = (
+            (root / "stops" / (date + ".json")).is_file()
+            or (root_for(project) / "stops" / (date + ".json")).is_file()
+            or (pre.is_file() and json.loads(pre.read_bytes()).get("stopped") is True)
         )
         if skipped:
             orders = [dict(o, stop_observed=True) for o in orders]
@@ -293,8 +302,24 @@ def apply_openings(project, s, through, now, capital=A0_5.capital):
     return s
 
 
-def run(project, date=None, *, now=None, preview=False, refresh=False, revise=False, capital=None):
+def run(
+    project,
+    date=None,
+    *,
+    now=None,
+    preview=False,
+    refresh=False,
+    revise=False,
+    capital=None,
+    _record_clock=None,
+):
     now = now or datetime.now(JST)
+    if _record_clock is None:
+        origin, started = now, monotonic()
+
+        def _record_clock():
+            return origin + timedelta(seconds=monotonic() - started)
+
     if capital is None:
         if refresh:
             inputs.refresh_flow(project, now)
@@ -309,6 +334,7 @@ def run(project, date=None, *, now=None, preview=False, refresh=False, revise=Fa
                 refresh=refresh,
                 revise=revise,
                 capital=value,
+                _record_clock=_record_clock,
             )
             for value in A0_5_PAPER_CAPITALS
         }
@@ -367,13 +393,174 @@ def run(project, date=None, *, now=None, preview=False, refresh=False, revise=Fa
             )
         if stopped(project):
             return {"state": "stopped", "mode": MODE}
-        for p in s["positions"]:
-            p["S33"] = record.get("holding_sectors", {}).get(p["Code"], p["S33"])
-        record["saved_revision"] = s["revision"] + 1
-        s["plans"][iso(day)] = record
-        book.save(root, s)
-        export(root, record, s["revision"])
+        record["recorded_at"] = max(now, _record_clock()).isoformat()
+        store_decision(root, s, record)
         return record
+
+
+def store_decision(root, state, record):
+    for holding in state["positions"]:
+        holding["S33"] = record.get("holding_sectors", {}).get(holding["Code"], holding["S33"])
+    record["saved_revision"] = state["revision"] + 1
+    state["plans"][record["date"]] = record
+    book.save(root, state)
+    export(root, record, state["revision"])
+
+
+def recover_morning(project, signal_date, *, now=None, capital=3_000_000, anchor=None):
+    """Recover the registered B account using the real information/deadline of the next open."""
+    now = datetime.now(JST) if now is None else now
+    if now.utcoffset() is None:
+        raise ValueError("タイムゾーンが必要です")
+    now = now.astimezone(JST)
+    started = monotonic()
+
+    def stamp():
+        return now + timedelta(seconds=monotonic() - started)
+
+    day = pd.Timestamp(signal_date)
+    daystr = iso(day)
+    bound = anchor or project / "data/plan-forward/accounts/B/baseline.json"
+    if not bound.is_file():
+        return dict(state="not_started", date=daystr)
+    anchor = json.loads(bound.read_bytes())
+    if daystr < anchor["start"] or anchor["initial_capital"] != capital:
+        return dict(state="outside_comparison", date=daystr)
+    if not enabled(project):
+        return dict(state="disabled", date=daystr)
+    root = root_for(project, capital)
+    with single_writer(root_for(project)):
+        if not enabled(project):
+            return dict(state="disabled", date=daystr)
+        if anchor["native_revision_sha256"] != book.revision_digest(
+            root / "ledger.sqlite", anchor["native_revision"]
+        ):
+            raise ValueError("Bプランの開始記録と参照元が一致しません")
+        cal = inputs.calendar(project, day, stamp(), [])
+        idx = cal.get_indexer([day])[0]
+        if idx < 0 or idx + 1 >= len(cal):
+            raise ValueError("選定日と次の立会日を確認できません")
+        target = cal[idx + 1]
+        targetstr = iso(target)
+        deadline = datetime.combine(target.date(), time(9), JST)
+        if stamp().date() < target.date():
+            return dict(state="waiting_for_target", date=daystr, order_date=targetstr)
+        local_stop = root / "stops" / (targetstr + ".json")
+        state = book.load(root, capital)
+        last = stamp()
+        if (
+            stopped(project)
+            and last.date() == target.date()
+            and targetstr not in state["openings"]
+            and not local_stop.exists()
+        ):
+            atomic_write(
+                local_stop,
+                json.dumps(
+                    dict(
+                        observed_at=last.isoformat(),
+                        phase="preopen" if last < deadline else "native_open_reconciliation",
+                    )
+                ).encode(),
+            )
+        old = state["plans"].get(daystr)
+        # Advance only frozen instructions; exclude the target open while its decision is pending.
+        through = target if last >= deadline else day
+        settlement = None
+        if not stopped(project):
+            try:
+                state = apply_openings(project, state, through, last, capital)
+            except (ValueError, FileNotFoundError) as exc:
+                settlement = str(exc)
+        if old and old["state"] != "blocked":
+            if old["state"] != "disabled" and old.get("saved_revision") is not None:
+                export(root, old, old["saved_revision"])
+            result = {k: old[k] for k in ("state", "date", "cutoff", "decision_origin") if k in old}
+            result.update(order_date=targetstr, orders=len(old.get("orders", [])), frozen=True)
+            if settlement:
+                result["settlement_issue"] = settlement
+            if stopped(project) or local_stop.is_file():
+                result["state"] = "stopped"
+            return result
+        cutoff = stamp()
+        record = dict(
+            date=daystr,
+            order_date=targetstr,
+            mode=MODE,
+            cutoff=cutoff.isoformat(),
+            decision_origin="morning_recovery",
+            orders=[],
+        )
+        if stopped(project) or local_stop.exists():
+            record.update(state="stopped", reason="ペーパー停止を確認")
+        elif cutoff >= deadline or targetstr in state["openings"]:
+            record.update(state="missed_preopen", reason="寄付前に選定を確定できませんでした")
+        elif settlement:
+            record.update(state="blocked", reason=settlement)
+        else:
+            try:
+                candidate = assess(project, day, cutoff, state, preopen_target=targetstr)
+                if candidate["date"] != daystr or candidate["order_date"] != targetstr:
+                    raise ValueError("選定日の翌立会日と対象寄付が一致しません")
+                record.update(candidate)
+            except Exception as exc:
+                reason = (
+                    str(exc)
+                    if isinstance(exc, (ValueError, KeyError, FileNotFoundError))
+                    else type(exc).__name__
+                )
+                record.update(state="blocked", reason=reason)
+        recorded = stamp()
+        if stopped(project) and recorded < deadline:
+            if not local_stop.is_file():
+                atomic_write(
+                    local_stop, json.dumps(dict(observed_at=recorded.isoformat())).encode()
+                )
+            record = dict(
+                state="stopped",
+                date=daystr,
+                order_date=targetstr,
+                mode=MODE,
+                cutoff=cutoff.isoformat(),
+                decision_origin="morning_recovery",
+                orders=[],
+            )
+        if recorded >= deadline and record["state"] in ("ready", "blocked"):
+            record = dict(
+                state="missed_preopen",
+                date=daystr,
+                order_date=targetstr,
+                mode=MODE,
+                cutoff=cutoff.isoformat(),
+                decision_origin="morning_recovery",
+                orders=[],
+                reason="寄付前に選定を確定できませんでした",
+            )
+        record["recorded_at"] = recorded.isoformat()
+        if (
+            old
+            and record["state"] == old["state"] == "blocked"
+            and record["reason"] == old["reason"]
+        ):
+            export(root, old, old["saved_revision"])
+        else:
+            store_decision(root, state, record)
+        result = {
+            k: record[k]
+            for k in (
+                "state",
+                "date",
+                "order_date",
+                "cutoff",
+                "recorded_at",
+                "decision_origin",
+                "reason",
+            )
+            if k in record
+        }
+        if settlement:
+            result["settlement_issue"] = settlement
+        return dict(**result, orders=len(record["orders"]))
 
 
 def after_daily(project, date):
