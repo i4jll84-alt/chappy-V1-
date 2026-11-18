@@ -13,6 +13,7 @@ import httpx
 
 from trading_system.brokers.locking import single_writer
 from trading_system.data_sources.jquants import APIError
+from trading_system.plan_forward_hook import run_scheduled
 from trading_system.research import swing_earnings as earnings
 from trading_system.research import swing_macro as macro
 from trading_system.research import swing_shorts as shorts
@@ -767,7 +768,11 @@ def main():
     )
     p.add_argument("--answer", type=Path)
     args = p.parse_args()
-    result = run(Path.cwd(), args.action, args.answer)
+    project = Path.cwd()
+    if args.action in {"morning", "evening"}:
+        result = run_scheduled(project, lambda: run(project, args.action, args.answer))
+    else:
+        result = run(project, args.action, args.answer)
     print(canonical(result))
     return int(
         result.get("short_public", "acquired") != "acquired"

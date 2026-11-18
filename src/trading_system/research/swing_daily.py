@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 from trading_system.brokers.locking import single_writer
 from trading_system.data_sources.jquants import APIError, JQuantsClient
 from trading_system.market_financial import ingest_market_financial
+from trading_system.plan_forward_hook import run_scheduled
 from trading_system.reference import ingest_reference
 from trading_system.settings import Settings, api_key
 from trading_system.storage.store import atomic_write, canonical
@@ -254,12 +255,18 @@ def main():
     args = p.parse_args()
     try:
         settings = Settings.load()
-        day = args.date
         if args.latest_closed_session:
             from trading_system.research.daytrade_universe import latest_closed_session
 
-            day = latest_closed_session(settings.data_root.resolve(), datetime.now(JST))
-        result = collect(day, settings, args.refresh)
+            data_root = settings.data_root.resolve()
+
+            def scheduled_collection():
+                day = latest_closed_session(data_root, datetime.now(JST))
+                return collect(day, settings, args.refresh)
+
+            result = run_scheduled(data_root.parent.parent, scheduled_collection)
+        else:
+            result = collect(args.date, settings, args.refresh)
         print(json.dumps(result, ensure_ascii=False))
     except APIError as exc:
         print(

@@ -1,0 +1,22 @@
+{
+  "plans": [
+    {
+      "id": "A",
+      "name": "基準③（日証金込み・保有上限なし・主集計方式）",
+      "stage": "active",
+      "adapter": "plan_a_forward",
+      "version": "s3-jsf-morning-v1",
+      "start": "2026-11-19",
+      "capital": 3000000
+    },
+    {
+      "id": "B",
+      "name": "A0-5（運用ガード付き）",
+      "stage": "active",
+      "adapter": "plan_b_forward",
+      "version": "a0-5-guarded-v1",
+      "start": "2026-11-19",
+      "capital": 3000000
+    }
+  ]
+}
