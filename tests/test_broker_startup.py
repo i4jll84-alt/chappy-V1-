@@ -212,6 +212,12 @@ def test_pending_vendor_does_not_block_other_or_restart_after_stop(tmp_path, mon
         ("read", {"current_day_chart_symbols": 0}, T, "当日分足 0/31"),
         (
             "read",
+            {"current_day_chart_symbols": 31, "index_issue": "excel_call_rejected"},
+            T,
+            "指数の読取は自動再試行中",
+        ),
+        (
+            "read",
             {"current_day_chart_symbols": 0},
             T.replace(hour=12, minute=0),
             "昼休み",

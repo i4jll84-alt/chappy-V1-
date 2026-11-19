@@ -10,6 +10,7 @@ from pathlib import Path
 
 import duckdb
 import pyarrow as pa
+
 from trading_system.research.swing_daily import verify_pages
 
 MODES = ("guarded", "extend_ma5", "extend_prior", "limit_gu3")

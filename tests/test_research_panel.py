@@ -391,3 +391,56 @@ def test_capture_process_failure_reasons(monkeypatch, tmp_path, reply, reason):
         "reason": reason,
         "stage": "process",
     }
+
+
+def test_optional_index_failure_retains_stock_data_and_clears_status_on_recovery(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(p, "configuration", lambda _: (CODES, tmp_path / "panel.xlsx"))
+    now = T
+    states = []
+    calls = 0
+
+    def read(_book, _symbols, rows):
+        nonlocal calls
+        if calls:
+            states.append(json.loads((tmp_path / "status.json").read_bytes()))
+        payload = sample()
+        if calls == 0:
+            payload["indexes"] = []
+            payload["index_issue"] = {
+                "reason": "excel_call_rejected",
+                "stage": "indexes",
+                "hresult": "0x80010001",
+            }
+        else:
+            payload["indexes"] = [{"code": "TOPX", "fields": ["2026/11/04", "09:10:00", 2500]}]
+            publish_stop(tmp_path)
+        calls += 1
+        return payload
+
+    def advance(seconds):
+        nonlocal now
+        now += timedelta(seconds=seconds)
+
+    p.run(
+        tmp_path,
+        int(T.timestamp() * 1e9),
+        "none",
+        clock=lambda: now,
+        sleep=advance,
+        opener=lambda _: None,
+        reader=read,
+    )
+    assert states[0]["state"] == "read"
+    assert states[0]["index_issue"] == "excel_call_rejected"
+    assert "index_issue" not in json.loads((tmp_path / "status.json").read_bytes())
+    with sqlite3.connect(tmp_path / "research.sqlite") as db:
+        assert db.execute("select count(*) from quotes").fetchone()[0] == 62
+        assert db.execute("select count(*) from bars").fetchone()[0] == 62
+        assert db.execute("select count(*) from market_indexes").fetchone()[0] == 1
+        rows = db.execute("select state,raw_gzip from frames order by id").fetchall()
+        assert [row[0] for row in rows] == ["read", "read"]
+        first = json.loads(gzip.decompress(rows[0][1]))
+        assert first["index_issue"]["stage"] == "indexes"
+        assert first["items"] == sample()["items"]

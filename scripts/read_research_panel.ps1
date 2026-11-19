@@ -55,6 +55,7 @@ public static class RakutenExcelRead {
 "@
 function Get-ExcelProperty($target, [string]$name, [object[]]$arguments) {
     if ($null -eq $target) {throw 'excel_property_unavailable'}
+    $attempt=0
     while ($true) {
         try {
             # PowerShell's ordinary property getter can turn a COM exception into $null.
@@ -67,10 +68,16 @@ function Get-ExcelProperty($target, [string]$name, [object[]]$arguments) {
             return ,$value
         } catch {
             $issue = Get-ReadFailure $_.Exception $stage $affectedSymbol
+            # Back off per property, with a shared 1.8 s sleep budget per snapshot.
+            # A previous property's recovered error must not consume all retries.
+            $delay=[Math]::Min(600,200 * ($attempt+1))
             if ($issue.reason -notin @('excel_call_rejected','excel_retry_later') -or
-                $retryLog.Count -ge 2) {throw}
-            $retryLog.Add(@{stage=$stage; property=$name; symbol=$affectedSymbol; hresult=$issue.hresult})
-            Start-Sleep -Milliseconds (200 * $retryLog.Count)
+                $retryState.delay_ms + $delay -gt 1800) {throw}
+            $attempt++
+            $retryState.delay_ms += $delay
+            $retryLog.Add(@{stage=$stage; property=$name; symbol=$affectedSymbol;
+                hresult=$issue.hresult; attempt=$attempt; delay_ms=$delay})
+            Start-Sleep -Milliseconds $delay
         }
     }
 }
@@ -109,9 +116,37 @@ function Get-ChartBars($matrix, $limit, $hasGuardRow) {
         ,$bar
     }
 }
+function Add-IndexSnapshot($data, $quoteSheet, $last) {
+    $stage='indexes'
+    $affectedSymbol=$null
+    $data.indexes=@()
+    try {
+        $indexes=@()
+        $ix=Get-ExcelProperty $quoteSheet 'Range' @("A$($last+4):D$($last+5)")
+        $ifm=Read-Matrix $ix 'Formula2' 2 4
+        $iv=Read-Matrix $ix 'Value2' 2 4
+        $ia=Read-Matrix $ix 'Formula2' 2 4
+        $ixCodes=@('N225','TOPX');$ixFields=@('現在日付','更新時刻','現在値')
+        for($i=0;$i -lt 2;$i++){
+            $key=$ixCodes[$i];$ok=$iv.GetValue($i+1,1) -ceq $key
+            $snapshot=@()
+            for($j=0;$j -lt 3;$j++){
+                $wanted='=RssIndexMarket("'+$key+'","'+$ixFields[$j]+'")'
+                $ok=$ok -and (Test-Formula ($ifm.GetValue($i+1,$j+2)) $wanted) -and (Test-Formula ($ia.GetValue($i+1,$j+2)) $wanted)
+                $snapshot+=,($iv.GetValue($i+1,$j+2))
+            }
+            if($ok){$indexes+=@{code=$key;fields=$snapshot}}
+        }
+        $data.indexes=$indexes
+    } catch {
+        # A failed optional index read must not discard validated stock quotes/bars.
+        $data.index_issue=Get-ReadFailure $_.Exception $stage $affectedSymbol
+    }
+}
 $stage='panel'
 $affectedSymbol=$null
 $retryLog=[Collections.Generic.List[object]]::new()
+$retryState=@{delay_ms=0}
 try {
     $paired=$Batch -ge 0
     if(((-not $paired) -and $expected.Count -ne 31) -or $expected.Count -lt 31 -or $expected.Count -gt 61 -or
@@ -228,26 +263,9 @@ try {
         # Retain that snapshot even if an independent chart operation failed.
         $chartIssue=Get-ReadFailure $_.Exception $stage $affectedSymbol
     }
-    $stage='indexes'
-    $affectedSymbol=$null
-    $indexes=@()
-    $ix=Get-ExcelProperty $quoteSheet 'Range' @("A$($last+4):D$($last+5)")
-    $ifm=Read-Matrix $ix 'Formula2' 2 4
-    $iv=Read-Matrix $ix 'Value2' 2 4
-    $ia=Read-Matrix $ix 'Formula2' 2 4
-    $ixCodes=@('N225','TOPX');$ixFields=@('現在日付','更新時刻','現在値')
-    for($i=0;$i -lt 2;$i++){
-        $key=$ixCodes[$i];$ok=$iv.GetValue($i+1,1) -ceq $key
-        $snapshot=@()
-        for($j=0;$j -lt 3;$j++){
-            $wanted='=RssIndexMarket("'+$key+'","'+$ixFields[$j]+'")'
-            $ok=$ok -and (Test-Formula ($ifm.GetValue($i+1,$j+2)) $wanted) -and (Test-Formula ($ia.GetValue($i+1,$j+2)) $wanted)
-            $snapshot+=,($iv.GetValue($i+1,$j+2))
-        }
-        if($ok){$indexes+=@{code=$key;fields=$snapshot}}
-    }
-    $data=@{state='read';items=$result;indexes=$indexes}
+    $data=@{state='read';items=$result;indexes=@()}
     if($chartIssue){$data.chart_issue=$chartIssue}
+    Add-IndexSnapshot $data $quoteSheet $last
 } catch {
     $data=Get-ReadFailure $_.Exception $stage $affectedSymbol
 }

@@ -12,6 +12,8 @@ def test_excel_property_reads_and_chart_snapshot():
     scenario = r"""
 $ErrorActionPreference = 'Stop'
 . $env:RSS_TEST_READER -WorkbookPath unused -Symbols fixture | Out-Null
+$testSleeps=[Collections.Generic.List[int]]::new()
+function Start-Sleep([int]$Milliseconds) { $testSleeps.Add($Milliseconds) }
 Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
@@ -49,13 +51,23 @@ if ($result.Rank -ne 2 -or $result.GetLength(0) -ne 32 -or $range.Calls -ne 3 -o
     $retryLog.Count -ne 1 -or $retryLog[0].hresult -ne '0x80010001' -or
     $retryLog[0].stage -ne $stage -or $retryLog[0].property -ne 'Formula2') {throw 'retry evidence'}
 $range.Code=[int]0x8001010A
-$range.Failures=9
+$range.Failures=2
+$result=Read-Matrix $range 'Formula2' 32 11
+if ($range.Calls -ne 6 -or $retryLog.Count -ne 3 -or $retryState.delay_ms -ne 800 -or
+    $retryLog[1].attempt -ne 1 -or $retryLog[2].attempt -ne 2) {throw 'per-property backoff'}
+$retryLog.Clear();$retryState.delay_ms=0;$testSleeps.Clear();$range.Calls=0
+$range.Failures=99
 Assert-Failure {Read-Matrix $range 'Formula2' 32 11} 'excel_retry_later'
-if ($range.Calls -ne 5 -or $retryLog.Count -ne 2) {throw 'per-frame retry limit'}
-$retryLog.Clear()
+if ($range.Calls -ne 5 -or $retryLog.Count -ne 4 -or $retryState.delay_ms -ne 1800 -or
+    ($testSleeps -join ',') -ne '200,400,600,600') {throw 'bounded snapshot sleep budget'}
+Assert-Failure {Read-Matrix $range 'Formula2' 32 11} 'excel_retry_later'
+if ($range.Calls -ne 6 -or $retryLog.Count -ne 4) {throw 'exhausted budget retried'}
+$retryLog.Clear();$retryState.delay_ms=0
 $range.Code=[int]0x800A03EC
 Assert-Failure {Read-Matrix $range 'Formula2' 32 11} 'excel_unavailable'
-if ($range.Calls -ne 6 -or $retryLog.Count) {throw 'permanent failure retried'}
+if ($range.Calls -ne 7 -or $retryLog.Count -or $retryState.delay_ms) {
+    throw 'permanent failure retried'
+}
 $range.Failures=0
 $range.Data=$null
 Assert-Failure {Read-Matrix $range 'Formula2' 32 11} 'excel_property_unavailable'
@@ -95,6 +107,70 @@ Assert-Failure {Get-ChartBars $matrix 12 $true} 'chart_range_changed'
 $matrix.SetValue('changed',2,2)
 Assert-Failure {Get-ChartBars $matrix 12 $false} 'chart_header'
 if (Test-Formula '=wrong' '=expected') {throw 'invalid formula accepted'}
+
+# An optional index failure must retain validated quotes/bars and its own issue.
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class IndexFixture {
+    public int Calls, FailAt;
+    public object Formulas, Values;
+    public object Read(object value) {
+        if (++Calls == FailAt) throw new COMException("sensitive", unchecked((int)0x800A03EC));
+        return value;
+    }
+    public object Formula2 { get { return Read(Formulas); } }
+    public object Value2 { get { return Read(Values); } }
+}
+public class IndexSheetFixture {
+    public IndexFixture Index = new IndexFixture();
+    public object Range(string address) {
+        if (address != "A36:D37") throw new Exception("wrong index range");
+        return Index;
+    }
+}
+"@
+$sheet=[IndexSheetFixture]::new()
+$fm=[Array]::CreateInstance([object], [int[]]@(2,4), [int[]]@(1,1))
+$vm=[Array]::CreateInstance([object], [int[]]@(2,4), [int[]]@(1,1))
+$codes=@('N225','TOPX');$fields=@('現在日付','更新時刻','現在値')
+for($i=0;$i -lt 2;$i++){
+    $vm.SetValue($codes[$i],$i+1,1)
+    for($j=0;$j -lt 3;$j++){
+        $fm.SetValue(('=RssIndexMarket("'+$codes[$i]+'","'+$fields[$j]+'")'),$i+1,$j+2)
+        $vm.SetValue(@('2026/11/19','13:30:00',12345)[$j],$i+1,$j+2)
+    }
+}
+$sheet.Index.Formulas=$fm;$sheet.Index.Values=$vm
+foreach($failAt in 0,1,2,3){
+    $sheet.Index.Calls=0;$sheet.Index.FailAt=$failAt
+    $data=@{state='read';items=@(@{symbol='9360.T';quote=@(2525);bars=@(@(2525,100))});
+        chart_issue=@{reason='chart_range_changed'}}
+    $before=$data.items | ConvertTo-Json -Depth 7 -Compress
+    Add-IndexSnapshot $data $sheet 32
+    $after=$data.items | ConvertTo-Json -Depth 7 -Compress
+    if ($data.state -ne 'read' -or $before -cne $after -or
+        $data.chart_issue.reason -ne 'chart_range_changed') {throw 'validated stock data discarded'}
+    if ($failAt) {
+        if ($data.indexes.Count -ne 0 -or $data.index_issue.stage -ne 'indexes' -or
+            $data.index_issue.reason -ne 'excel_unavailable' -or
+            ($data | ConvertTo-Json -Depth 7) -match 'sensitive') {
+            throw 'index failure not isolated'
+        }
+    } elseif ($data.indexes.Count -ne 2 -or $data.index_issue -or
+        $data.indexes[1].code -ne 'TOPX') {throw 'valid indexes lost'}
+}
+$sheet.Index.Calls=0;$sheet.Index.FailAt=0
+$fm.SetValue('=wrong',1,2)
+$data=@{state='read';items=@()}
+Add-IndexSnapshot $data $sheet 32
+if ($data.indexes.Count -ne 1 -or $data.indexes[0].code -ne 'TOPX') {throw 'invalid index accepted'}
+$sheet.Index.Values='invalid range'
+$data=@{state='read';items=@(@{symbol='9360.T'})}
+Add-IndexSnapshot $data $sheet 32
+if ($data.index_issue.reason -ne 'excel_range_shape' -or $data.items.Count -ne 1) {
+    throw 'index shape'
+}
 """
     subprocess.run(
         [

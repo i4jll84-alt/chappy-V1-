@@ -61,6 +61,8 @@ def active_status(broker, data, now):
             )
         if (local - saved).total_seconds() > 90:
             return f"読取更新待ち（最終保存 {stamp}）。ExcelとRSSの接続を確認してください。"
+        if data.get("index_issue"):
+            return f"株価を保存中。指数の読取は自動再試行中（最終保存 {stamp}）。"
         n = data.get("current_day_chart_symbols")
         streaming = data.get("streaming_charts")
         if local.weekday() >= 5:

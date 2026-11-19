@@ -397,6 +397,8 @@ def run(
                         data = {**reader(book, symbols, rows), "requested_rows": rows}
                     result = save(db, symbols, data, begin, clock())
                     success = result["state"] == "read"
+                    if success and data.get("index_issue"):
+                        result["index_issue"] = data["index_issue"].get("reason")
                     streaming = result["streaming_charts"] == len(symbols)
                     if paired:
                         active = set(batches[batch_index])
