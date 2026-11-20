@@ -126,12 +126,10 @@ def test_dashboard_starts_in_background_and_shows_real_receipts(tmp_path, monkey
         assert view.recovery.item("daily", "values")[2] == "今回処理済み"
         view.start()
         view.start()
-        assert spawn.call_count == 1 and view.restore_button.instate(["disabled"])
+        assert spawn.call_count == 1
         child.poll.return_value = 2
         view.refresh()
-        assert "途中で終了" in view.recovery_label.get() and view.restore_button.instate(
-            ["!disabled"]
-        )
+        assert "途中で終了" in view.recovery_label.get()
         assert view.recovery.item("jsf", "values")[2] == "前回中断"
         (root / "summary.json").write_bytes(b"broken")
         view.refresh()
@@ -172,17 +170,15 @@ def test_opening_rechecks_completed_work_and_respects_active_worker(tmp_path, mo
             spawn.assert_called_once_with(tmp_path, "--catch-up")
         if state in {"external_worker", "completed"}:
             assert "実行中" in view.recovery_label.get()
-            assert view.restore_button.instate(["disabled"])
         elif state == "launch_error":
             assert "起動できません" in view.recovery_label.get()
-            assert view.restore_button.instate(["!disabled"])
         # Refreshing the displayed state does not start a second worker.
         view.frame.after_cancel(view.timer)
         view.tick()
         assert spawn.call_count == (0 if state in {"external_worker", "unconfigured"} else 1)
         if state == "launch_error":
             spawn.side_effect = None
-            view.open_program()
+            view.start()
             assert spawn.call_count == 2
             assert "実行中" in view.recovery_label.get()
     finally:
@@ -395,27 +391,6 @@ def test_morning_diagnosis_uses_dated_evidence_and_real_freeze_time(tmp_path):
     assert dashboard.morning_check(tmp_path, day) == (changed, None)
 
 
-def test_program_button_shows_paper_tab_without_duplicate_during_external_run(
-    tmp_path, monkeypatch
-):
-    window = create_window(tk)
-    window.withdraw()
-    try:
-        notebook = ttk.Notebook(window)
-        notebook.pack()
-        view = dashboard.PlanDashboard(notebook, tmp_path, lambda _: True)
-        notebook.select(notebook.tabs()[1])
-        spawn = Mock()
-        monkeypatch.setattr(dashboard, "spawn_catchup", spawn)
-        view.open_program()
-        assert notebook.select() == str(view.frame)
-        assert view.restore_button.cget("text") == "プログラム起動"
-        assert view.restore_button.instate(["disabled"])
-        assert "実行中" in view.recovery_label.get() and not spawn.called
-    finally:
-        window.destroy()
-
-
 def test_pending_at_open_becomes_unconfirmed_until_final_receipt_arrives():
     day = "2026-11-20"
     view = dashboard.PlanDashboard.__new__(dashboard.PlanDashboard)
@@ -439,3 +414,59 @@ def test_pending_at_open_becomes_unconfirmed_until_final_receipt_arrives():
     assert "期限経過" in dashboard.plan_evidence(view.morning, "A", True)
     view.morning.update(state="met", label="朝の起動だけで確定")
     assert "期限経過" not in dashboard.morning_evidence(view.morning, day, None, True)
+
+
+def test_holdings_tab_updates_prices_without_changing_account_snapshot(tmp_path, monkeypatch):
+    window = create_window(tk)
+    window.withdraw()
+    try:
+        notebook = ttk.Notebook(window)
+        notebook.pack()
+        view = dashboard.PlanDashboard(notebook, tmp_path, lambda _: False)
+        data = dict(
+            rows=[
+                dict(
+                    plan="A",
+                    code="12340",
+                    name="テスト銘柄",
+                    shares="100",
+                    entry_price="1000.125",
+                    current_price="1020.5",
+                    price_date="2026-11-20",
+                    entry_date="2026-11-19",
+                    note="",
+                )
+            ],
+            status="A：保有1銘柄　　B：保有0銘柄",
+            issue="",
+        )
+        reader = Mock(return_value=data)
+        monkeypatch.setattr(view.holdings_reader, "read", reader)
+        window.update_idletasks()
+        assert [notebook.tab(tab, "text") for tab in notebook.tabs()] == [
+            "A・Bの稼働状況",
+            "保有銘柄",
+            "トレード手法",
+        ]
+        values = view.holdings.item(view.holdings.get_children()[0], "values")
+        assert values == (
+            "A",
+            "1234",
+            "テスト銘柄",
+            "100",
+            "1,000.125",
+            "1,020.5",
+            "2026-11-20",
+            "2026-11-19",
+            "",
+        )
+        assert "B：保有0銘柄" in view.holdings_status.get()
+        reader.return_value = dict(data, rows=[dict(data["rows"][0], current_price=None)])
+        view.refresh()
+        assert view.holdings.item(view.holdings.get_children()[0], "values")[5] == "未確認"
+        reader.return_value = dict(data, rows=[], status="A：保有0銘柄　　B：保有0銘柄")
+        view.refresh()
+        assert not view.holdings.get_children()
+        assert "A：保有0銘柄" in view.holdings_status.get()
+    finally:
+        window.destroy()

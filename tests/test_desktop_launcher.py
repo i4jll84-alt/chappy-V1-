@@ -258,21 +258,7 @@ def test_launcher_buttons_use_selection_for_research_and_connection(tmp_path, mo
         assert opened == [view.workbook, book]
         check.assert_not_called()
         study.assert_not_called()
-        program = Mock()
-        monkeypatch.setattr(view.plan_dashboard, "start", program)
-        notebook = view.plan_dashboard.notebook
-        notebook.select(notebook.tabs()[-1])
-        broker_program = next(
-            w
-            for w in widgets
-            if isinstance(w, ttk.Button)
-            and w.cget("text") == "プログラム起動"
-            and w.master == buttons["証券データ取得"].master
-        )
-        broker_program.invoke()
-        assert notebook.select() == str(view.plan_dashboard.frame)
-        program.assert_called_once()
-        study.assert_not_called()
+        assert "プログラム起動" not in buttons
         next(
             w for w in widgets if isinstance(w, ttk.Radiobutton) and w.cget("text") == "両方"
         ).invoke()

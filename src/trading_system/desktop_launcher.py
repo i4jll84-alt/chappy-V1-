@@ -437,11 +437,6 @@ class Launcher:
         actions.pack(fill="x")
         ttk.Button(
             actions,
-            text="プログラム起動",
-            command=self.plan_dashboard.open_program,
-        ).pack(side="left", padx=(0, 10))
-        ttk.Button(
-            actions,
             text="証券データ取得",
             command=self.start_research,
         ).pack(side="left", padx=(0, 10))

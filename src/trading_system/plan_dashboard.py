@@ -7,6 +7,7 @@ from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
 
 from trading_system.plan_forward import STATUS_LABELS
+from trading_system.plan_holdings import HoldingsReader, positive
 
 JST = ZoneInfo("Asia/Tokyo")
 PREOPEN_CHECK = time(7, 40)
@@ -155,6 +156,13 @@ def yen(value):
         return f"{amount:,.0f}円" if amount.is_finite() else "—"
     except InvalidOperation:
         return "—"
+
+
+def share_price(value):
+    number = positive(value)
+    if number is None:
+        return "未確認"
+    return f"{number:,.3f}".rstrip("0").rstrip(".")
 
 
 def account_line(plan):
@@ -360,8 +368,6 @@ class PlanDashboard:
         heading = ttk.Frame(tab)
         heading.pack(fill="x")
         ttk.Label(heading, text="フォワードテスト", style="Title.TLabel").pack(side="left")
-        self.restore_button = ttk.Button(heading, text="プログラム起動", command=self.open_program)
-        self.restore_button.pack(side="right")
         self.checked = tk.StringVar(master=tab)
         ttk.Label(tab, textvariable=self.checked).pack(anchor="w", pady=(0, 10))
         self.schedule_label = tk.StringVar(master=tab)
@@ -421,6 +427,7 @@ class PlanDashboard:
             anchor="w", pady=(3, 0)
         )
         self.recovery.bind("<<TreeviewSelect>>", lambda _e: self.show_step())
+        self.add_holdings(notebook)
         self.add_rules(notebook)
         self.timer = tab.after_idle(self.on_startup)
         tab.bind("<Destroy>", self.on_destroy, add=True)
@@ -452,6 +459,77 @@ class PlanDashboard:
         scroll.pack(side="right", fill="y")
         return tree
 
+    def add_holdings(self, notebook):
+        import tkinter as tk
+        from tkinter import ttk
+
+        tab = ttk.Frame(notebook, padding=(20, 12))
+        notebook.add(tab, text="保有銘柄")
+        ttk.Label(tab, text="フォワードテストの保有銘柄", style="Title.TLabel").pack(anchor="w")
+        self.holdings_status = tk.StringVar(master=tab)
+        ttk.Label(tab, textvariable=self.holdings_status, wraplength=800, justify="left").pack(
+            anchor="w", pady=(8, 10)
+        )
+        self.holdings = self.table(
+            tab,
+            [
+                ("plan", "口座", 50),
+                ("code", "コード", 65),
+                ("name", "銘柄名", 260),
+                ("shares", "株数", 65),
+                ("entry_price", "取得価格（円）", 110),
+                ("current_price", "現在価格（円）", 110),
+                ("price_date", "終値の日付", 105),
+                ("entry_date", "取得日", 105),
+                ("note", "備考", 220),
+            ],
+            height=12,
+            expand=True,
+        )
+        for key in self.holdings["columns"]:
+            self.holdings.column(key, stretch=False)
+        for key in ("shares", "entry_price", "current_price"):
+            self.holdings.column(key, anchor="e")
+        scroll = ttk.Scrollbar(tab, orient="horizontal", command=self.holdings.xview)
+        scroll.pack(fill="x")
+        self.holdings.configure(xscrollcommand=scroll.set)
+        ttk.Label(
+            tab,
+            text="現在価格は保存済み日足の最新終値です。終値の日付を確認してください。\n"
+            "取得価格は費用を除く仮想約定価格です。取得後の分割・併合は備考に表示します。",
+            wraplength=800,
+            justify="left",
+        ).pack(anchor="w", pady=(10, 0))
+        self.holdings_reader = HoldingsReader(self.project)
+        self.last_holdings = None
+
+    def refresh_holdings(self, plans, now):
+        data = self.holdings_reader.read(plans, now)
+        if data == self.last_holdings:
+            return
+        self.last_holdings = data
+        self.holdings_status.set(data["status"] + ("\n" + data["issue"] if data["issue"] else ""))
+        if self.holdings.get_children():
+            self.holdings.delete(*self.holdings.get_children())
+        for row in data["rows"]:
+            code = row["code"]
+            display_code = code[:-1] if len(code) == 5 and code.endswith("0") else code
+            self.holdings.insert(
+                "",
+                "end",
+                values=(
+                    row["plan"],
+                    display_code,
+                    row["name"],
+                    share_price(row["shares"]),
+                    share_price(row["entry_price"]),
+                    share_price(row["current_price"]),
+                    row["price_date"] or "未確認",
+                    row["entry_date"] or "未確認",
+                    row["note"],
+                ),
+            )
+
     @staticmethod
     def add_rules(notebook):
         from tkinter import ttk
@@ -480,10 +558,10 @@ class PlanDashboard:
             self.timer = None
 
     def on_startup(self):
-        # Opening the tool has the same effect as the program button, at any hour.
-        # start() shares the worker/dispatch lock checks with manual and timed runs.
+        # Opening the tool starts the configured paper programs at any hour.
+        # The worker/dispatch lock checks are shared with timed runs.
         if (self.project / "config/forward-plans.json").is_file():
-            self.open_program()
+            self.start()
         self.tick()
 
     def tick(self, opening=False):
@@ -582,10 +660,6 @@ class PlanDashboard:
             return
         self.start("--evening-check")
 
-    def open_program(self):
-        self.notebook.select(self.frame)
-        self.start()
-
     def busy(self):
         if self.child is not None and self.child.poll() is None:
             return True
@@ -610,7 +684,9 @@ class PlanDashboard:
             self.child_result = ""
         except OSError:
             self.child = None
-            self.child_result = "復旧処理を起動できません。Python環境を確認してください。"
+            self.child_result = (
+                "復旧処理を起動できません。Python環境を確認し、ツールを開き直してください。"
+            )
         self.refresh()
 
     def refresh(self):
@@ -620,7 +696,6 @@ class PlanDashboard:
             )
             self.child = None
         running = self.busy()
-        self.restore_button.state(["disabled"] if running else ["!disabled"])
         summary, summary_issue = read_report(self.root / "summary.json")
         rec, rec_issue = read_report(self.root / "recovery/latest.json")
         now = datetime.now(JST)
@@ -639,6 +714,10 @@ class PlanDashboard:
             proof_issue,
             expired,
         )
+        plans = summary.get("plans", {})
+        if not isinstance(plans, dict) or not all(isinstance(p, dict) for p in plans.values()):
+            plans = {}
+        self.refresh_holdings(plans, now)
         if values == self.last_values:
             return
         self.last_values = values
