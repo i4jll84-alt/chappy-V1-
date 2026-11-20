@@ -348,33 +348,6 @@ def after_stop(project, day, broker):
         canonical({**result, "date": str(day), "at": datetime.now(UTC).isoformat()}).encode(),
         sharing_retries=50,
     )
-    if (
-        result["state"] == "published"
-        and (project / f"data/rss-panel/daily/{day}/selection.json").is_file()
-    ):
-        from trading_system.research.paired_comparison import compare
-
-        if datetime.now(JST) >= datetime.combine(day, datetime.min.time(), JST) + timedelta(
-            hours=15, minutes=30
-        ):
-            # Both recorders publish the combined file. If another comparison has the
-            # ledger open, rerun against the latest publication once it finishes.
-            for attempt in range(61):
-                try:
-                    state = compare(project, day)["state"]
-                except (OSError, ValueError, KeyError, sqlite3.Error) as exc:
-                    if str(exc) in ("broker_state_already_open", "comparison_inputs_changed"):
-                        if attempt < 60:
-                            time.sleep(1)
-                            continue
-                        if str(exc) == "broker_state_already_open":
-                            return
-                    state = "failed_" + type(exc).__name__
-                break
-            atomic_write(
-                target / "comparison-status.json",
-                canonical({"date": str(day), "state": state}).encode(),
-            )
 
 
 def main():

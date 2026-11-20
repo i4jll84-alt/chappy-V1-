@@ -2,11 +2,11 @@ import json
 import sqlite3
 from datetime import date, datetime, timedelta
 
+import pytest
+
 from trading_system import research_panel as panel
-from trading_system.research import paired_comparison as pc
 from trading_system.research import shared_market
 from trading_system.research.daytrade_universe import paired_symbols, panel_location
-from trading_system.research.shared_market import publish
 from trading_system.research_workbook import chart_batches
 
 
@@ -42,7 +42,7 @@ def test_union_interleaves_duplicates_once_and_respects_limit(tmp_path):
         assert panel.panel_symbols(dict(version=2, symbols=symbols)) == symbols
 
 
-def test_both_batches_save_and_replay_separate_accounts(tmp_path):
+def test_both_batches_publish_observations_without_fixed_rule_trades(tmp_path):
     day = date(2026, 11, 16)
     root = tmp_path / "data/rss-panel"
     fixed, daily, union = roster(root, day, 1)
@@ -85,43 +85,45 @@ def test_both_batches_save_and_replay_separate_accounts(tmp_path):
         record("09:59:25", 1, "signal")
         record("10:00:10", 0, "buy")
         record("10:30:10", 1, "sell")
-    publish(tmp_path, day)
-    result = pc.compare(tmp_path, day, sessions=[str(day)])
-    assert result["state"] == "partial" and result["daily_minus_fixed_yen"] is None
-    assert result["arms"]["fixed"]["stats"]["round_trips"] == 1
-    assert result["arms"]["daily"]["stats"]["round_trips"] == 2
-    assert (
-        result["arms"]["fixed"]["stats"]["net_closed"]
-        == result["arms"]["daily"]["stats"]["net_closed"] / 2
-    )
-    assert all(len(v["decisions"]) == 60 for v in result["arms"].values())
-    assert (tmp_path / f"data/research/paired-comparison/{day}/比較結果.txt").is_file()
+    shared_market.after_stop(tmp_path, day, "rakuten")
+    output = tmp_path / "data/research/shared-market"
+    with sqlite3.connect(output / f"{day}.sqlite") as db:
+        assert db.execute("SELECT count(*) FROM quotes").fetchone()[0] == 4 * len(union)
+        assert db.execute("SELECT count(distinct symbol) FROM minute_bars").fetchone()[0] == len(
+            union
+        )
+        assert db.execute("SELECT count(*) FROM minute_bars WHERE elapsed_minute=0").fetchone()[
+            0
+        ] == len(union)
+    assert json.loads((output / "rakuten-publish.json").read_bytes())["state"] == "published"
+    assert not (tmp_path / "data/research/paired-comparison").exists()
+    assert not (output / "comparison-status.json").exists()
 
 
-def test_kabu_publication_runs_rakuten_comparison_after_contention(tmp_path, monkeypatch):
+@pytest.mark.parametrize("broker", ["rakuten", "mufg_esmart"])
+def test_publication_retries_storage_without_starting_retired_comparison(
+    tmp_path, monkeypatch, broker
+):
     day = date(2020, 11, 17)
     roster(tmp_path / "data/rss-panel", day, 0)
     output = tmp_path / "data/research/shared-market"
     output.mkdir(parents=True)
-    monkeypatch.setattr(
-        shared_market, "publish", lambda project, session: output / f"{session}.sqlite"
-    )
     monkeypatch.setattr(shared_market.time, "sleep", lambda _: None)
     attempts = []
 
-    def compare(project, session):
+    def publish(project, session):
         attempts.append((project, session))
         if len(attempts) == 1:
             raise ValueError("broker_state_already_open")
-        return {"state": "partial"}
+        return output / f"{session}.sqlite"
 
-    monkeypatch.setattr(pc, "compare", compare)
-    shared_market.after_stop(tmp_path, day, "mufg_esmart")
+    monkeypatch.setattr(shared_market, "publish", publish)
+    shared_market.after_stop(tmp_path, day, broker)
     assert attempts == [(tmp_path, day), (tmp_path, day)]
-    assert json.loads((output / "comparison-status.json").read_bytes()) == {
-        "date": str(day),
-        "state": "partial",
-    }
+    status = json.loads((output / f"{broker}-publish.json").read_bytes())
+    assert status["state"] == "published" and status["date"] == str(day)
+    assert not (output / "comparison-status.json").exists()
+    assert not (tmp_path / "data/research/paired-comparison").exists()
 
 
 def test_subscribing_is_not_a_bar_sample(tmp_path, monkeypatch):
