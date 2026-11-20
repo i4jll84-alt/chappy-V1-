@@ -9,6 +9,7 @@ from pathlib import Path
 from time import monotonic, sleep
 
 from trading_system.brokers.locking import single_writer
+from trading_system.plan_schedule import EVENING_CHECK
 from trading_system.research import a0_5, a0_5_inputs, swing_credit, swing_daily
 from trading_system.research import swing_earnings as earnings
 from trading_system.research import swing_short_sources as shorts
@@ -42,8 +43,8 @@ def at(day, when):
 
 
 def evening_threshold(day, now):
-    due = at(day, time(20, 10))
-    return due if now.date().isoformat() == day and now >= due else None
+    due = at(day, EVENING_CHECK)
+    return due if now >= due else None
 
 
 def result(status, **fields):
@@ -81,7 +82,7 @@ def grouped(days, action):
 def coverage(project, now, root):
     jq = project / "data/jquants"
     days, _ = calendar_days(jq, now.date(), now)
-    latest = now.date() if now.time() >= time(18) else now.date() - timedelta(days=1)
+    latest = now.date() if now.time() >= EVENING_CHECK else now.date() - timedelta(days=1)
     while days[latest.isoformat()] not in ("1", "2"):
         latest -= timedelta(days=1)
     sessions = sorted(d for d, f in days.items() if f in ("1", "2"))
@@ -525,8 +526,7 @@ def recover_supplemental(project, target, *, now=None):
                 if not a0_5.enabled(project) or target > tick().date().isoformat():
                     return result("skipped")
                 if target == tick().date().isoformat():
-                    # The normal 18:00 collector advances all native A0-5 paper books.
-                    # If it was missed, restore the remaining same-day book(s) as well as B.
+                    # The shared 22:00 workflow advances the remaining native books as well as B.
                     handled = report["steps"].get("native_evening", {}).get("capital")
                     accounts = {
                         cap: native_account(project, target, tick, cap)

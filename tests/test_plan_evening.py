@@ -47,9 +47,9 @@ def test_due_receipt_with_shared_sources_and_no_retired_accounts(tmp_path, monke
     set_clock(monkeypatch, "1")
     calls = []
     monkeypatch.setattr(evening, "collect", lambda p, n: calls.append((p, n)) or observations(DAY))
-    assert evening.run_evening(tmp_path, now=local("20:09"))["state"] == "not_due"
+    assert evening.run_evening(tmp_path, now=local("21:59"))["state"] == "not_due"
     assert not (tmp_path / "data").exists()
-    r = evening.run_evening(tmp_path, now=local("20:10"))
+    r = evening.run_evening(tmp_path, now=local("22:00"))
     assert r["status"] == "ok" and r["state"] == "evening"
     assert r["short_margin"] == {PREVIOUS: "already_acquired", DAY: "acquired"}
     assert r["credit"] == r["short_margin"] and r["short_public"] == "already_acquired"
@@ -67,7 +67,7 @@ def test_completed_historical_receipt_is_preserved(tmp_path, monkeypatch):
     recovery.save(path, record)
     before = path.read_bytes()
     monkeypatch.setattr(evening, "collect", lambda *a: pytest.fail("already completed"))
-    assert evening.run_evening(tmp_path, now=local("20:12")) == dict(record, already_handled=True)
+    assert evening.run_evening(tmp_path, now=local("22:02")) == dict(record, already_handled=True)
     assert path.read_bytes() == before
 
 
@@ -75,14 +75,14 @@ def test_busy_calendar_error_holiday_and_next_session(tmp_path, monkeypatch):
     root = tmp_path / "data/plan-forward/recovery/evening"
     monkeypatch.setattr(evening, "collect", lambda *a: pytest.fail("should skip"))
     with recovery.single_writer(root):
-        assert evening.run_evening(tmp_path, now=local("20:10"))["status"] == "busy"
+        assert evening.run_evening(tmp_path, now=local("22:00"))["status"] == "busy"
     assert not (root / (DAY + ".json")).exists()
     monkeypatch.setattr(evening, "calendar_days", lambda *a: ({}, []))
-    assert evening.run_evening(tmp_path, now=local("20:10"))["status"] == "error"
+    assert evening.run_evening(tmp_path, now=local("22:00"))["status"] == "error"
     set_clock(monkeypatch, "0")
-    result = evening.run_evening(tmp_path, now=local("20:15"))
+    result = evening.run_evening(tmp_path, now=local("22:05"))
     assert result["status"] == "ok" and result["state"] == "exchange_closed"
-    assert evening.run_evening(tmp_path, now=local("20:10", "2026-11-20"))["date"] == "2026-11-20"
+    assert evening.run_evening(tmp_path, now=local("22:00", "2026-11-20"))["date"] == "2026-11-20"
 
 
 def test_failed_source_can_retry_and_cannot_claim_verified_evidence(tmp_path, monkeypatch):
@@ -94,16 +94,17 @@ def test_failed_source_can_retry_and_cannot_claim_verified_evidence(tmp_path, mo
         "reason": "public_digest_mismatch",
     }
     monkeypatch.setattr(evening, "collect", lambda p, n: r)
-    bad = evening.run_evening(tmp_path, now=local("20:10"))
+    bad = evening.run_evening(tmp_path, now=local("22:00"))
     assert bad["status"] == "attention" and bad["short_margin"][DAY] == "empty"
     assert bad["short_public"] == "needs_review:public_digest_mismatch"
     assert "completed_at" not in bad
     monkeypatch.setattr(evening, "collect", lambda p, n: observations(DAY))
-    assert evening.run_evening(tmp_path, now=local("20:12"))["status"] == "ok"
+    assert evening.run_evening(tmp_path, now=local("22:02"))["status"] == "ok"
 
 
-def test_timed_earnings_refresh_keeps_retry_and_early_data_distinct(tmp_path, monkeypatch):
-    now = local("20:10")
+@pytest.mark.parametrize("day,at", [(DAY, "22:00"), ("2026-11-20", "07:40")])
+def test_timed_earnings_refresh_keeps_retry_and_early_data_distinct(tmp_path, monkeypatch, day, at):
+    now = local(at, day)
     records = [local("18:03")]
 
     def asof(root, cutoff):
@@ -130,7 +131,7 @@ def test_timed_earnings_refresh_keeps_retry_and_early_data_distinct(tmp_path, mo
 def test_native_paper_continues_without_advancing_the_retired_books(
     tmp_path, monkeypatch, existing_book
 ):
-    now = local("20:11")
+    now = local("22:01")
     root = tmp_path / "data/plan-forward/recovery"
     steps = {"native_evening": {"status": "ready", "capital": 3_000_000}}
     source = tmp_path / "data/swing-forward"
@@ -160,7 +161,7 @@ def test_native_paper_continues_without_advancing_the_retired_books(
     assert source.exists() == existing_book
 
 
-def test_short_public_after_2010_requires_one_full_new_archive(tmp_path, monkeypatch):
+def test_short_public_after_2200_requires_one_full_new_archive(tmp_path, monkeypatch):
     root = tmp_path / "data/free-market/public"
     root.mkdir(parents=True)
     db_path = root / "public.sqlite"
@@ -191,13 +192,13 @@ def test_short_public_after_2010_requires_one_full_new_archive(tmp_path, monkeyp
 
     def capture(project, day):
         calls.append(day)
-        seed("short-late", local("20:11").isoformat())
+        seed("short-late", local("22:01").isoformat())
         return "acquired"
 
     monkeypatch.setattr(recovery.shorts, "capture_public", capture)
 
     def tick():
-        return local("20:12")
+        return local("22:02")
 
     assert recovery.public(tmp_path, DAY, tick)["status"] == "recovered"
     assert recovery.public(tmp_path, DAY, tick)["status"] == "ready" and calls == [DAY]
@@ -211,5 +212,5 @@ def test_incomplete_source_proof_never_creates_completion(tmp_path, monkeypatch)
     r = observations(DAY)
     del r["supplemental"]["steps"]["earnings"]
     monkeypatch.setattr(evening, "collect", lambda *a: r)
-    checked = evening.run_evening(tmp_path, now=local("20:10"))
+    checked = evening.run_evening(tmp_path, now=local("22:00"))
     assert checked["status"] == "attention" and "completed_at" not in checked

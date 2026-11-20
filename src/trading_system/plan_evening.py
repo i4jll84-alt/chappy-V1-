@@ -1,10 +1,10 @@
-"""Reconcile the A/B paper plans and shared inputs for the 20:10 desktop run."""
+"""Reconcile the A/B paper plans and shared inputs for the 22:00 weekday run."""
 
-from datetime import time
 from pathlib import Path
 
 from trading_system import plan_recovery as recovery
 from trading_system.brokers.locking import single_writer
+from trading_system.plan_schedule import EVENING_CHECK
 from trading_system.research.daytrade_universe import calendar_days
 
 
@@ -70,7 +70,7 @@ def run_evening(project, *, now=None):
     tick = recovery.clock(now)
     current = tick()
     day = current.date().isoformat()
-    due = recovery.at(day, time(20, 10))
+    due = recovery.at(day, EVENING_CHECK)
     if current < due:
         return {"state": "not_due", "status": "waiting", "date": day, "due_at": due.isoformat()}
     root = project / "data/plan-forward/recovery/evening"

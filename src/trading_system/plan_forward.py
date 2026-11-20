@@ -250,11 +250,15 @@ def run_due(project, *, now=None, recovery_signal=None):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     actions = parser.add_mutually_exclusive_group(required=True)
-    for action in ("due", "status", "list", "catch-up", "evening-check"):
+    for action in ("due", "status", "list", "catch-up", "evening-check", "scheduled-close"):
         actions.add_argument("--" + action, action="store_true")
     parser.add_argument("--project", type=Path, default=Path(__file__).resolve().parents[2])
     opts = parser.parse_args(argv)
-    if opts.evening_check:
+    if opts.scheduled_close:
+        from trading_system.plan_schedule import run_scheduled_close
+
+        result = run_scheduled_close(opts.project)
+    elif opts.evening_check:
         from trading_system.plan_evening import run_evening
 
         result = run_evening(opts.project)

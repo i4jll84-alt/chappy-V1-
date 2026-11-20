@@ -105,7 +105,10 @@ def test_multiple_missing_sessions_financial_bridge_and_holiday(tmp_path, monkey
     )
     assert "2026-11-18" in recovery.coverage(tmp_path, stamp, root)[2]
     assert recovery.coverage(tmp_path, local("2026-11-23", "12:00"), root)[:2] == (target, next_day)
-    assert recovery.coverage(tmp_path, local("2026-11-24", "18:15"), root)[0] == "2026-11-24"
+    for at in ("18:00", "20:10", "21:59:59"):
+        assert recovery.coverage(tmp_path, local("2026-11-24", at), root)[0] == "2026-11-20"
+    for at in ("22:00", "22:15"):
+        assert recovery.coverage(tmp_path, local("2026-11-24", at), root)[0] == "2026-11-24"
 
 
 def test_late_and_parallel_recovery_status_and_checkpoints(tmp_path, monkeypatch):

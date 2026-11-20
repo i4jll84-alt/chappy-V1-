@@ -303,21 +303,22 @@ def test_evening_gate_and_external_completion_across_relaunch(tmp_path):
     view.root = tmp_path / "data/plan-forward"
     view.evening_day = None
     view.last_values = ({}, None, {}, None, False, "")
-    when = datetime.fromisoformat("2026-11-19T20:10:00+09:00")
+    when = datetime.fromisoformat("2026-11-19T22:00:00+09:00")
 
     def spawn(action):
         assert action == "--evening-check"
         view.evening_day = when.date()
 
     view.start = Mock(side_effect=spawn)
-    view.check_evening(when.replace(minute=9))
+    for hour, minute in [(18, 0), (20, 10), (21, 59)]:
+        view.check_evening(when.replace(hour=hour, minute=minute))
     assert not view.start.called
     view.check_evening(when)
-    view.check_evening(when.replace(minute=11))
+    view.check_evening(when.replace(minute=1))
     assert view.start.call_count == 1
     view.evening_day = None
     save(view.root / "recovery/evening/2026-11-19.json", {"status": "ok"})
-    view.check_evening(when.replace(hour=21))
+    view.check_evening(when.replace(hour=23))
     assert view.start.call_count == 1
 
 

@@ -8,10 +8,10 @@ from zoneinfo import ZoneInfo
 
 from trading_system.plan_forward import STATUS_LABELS
 from trading_system.plan_holdings import HoldingsReader, positive
+from trading_system.plan_schedule import EVENING_CHECK
 
 JST = ZoneInfo("Asia/Tokyo")
 PREOPEN_CHECK = time(7, 40)
-EVENING_CHECK = time(20, 10)
 STEP_LABELS = {
     "daily": "日足・銘柄情報",
     "jsf": "日証金",
@@ -520,7 +520,7 @@ class PlanDashboard:
         self.refresh()
         now = datetime.now(JST)
         self.saved_label.set(saved_evening_work(self.project, now, self.last_values[2]))
-        self.schedule_label.set("07:40 寄付前確認　　18:00 日足保存（Windows）　　20:10 引け処理")
+        self.schedule_label.set("07:40 寄付前確認　　平日22:00 日足保存・情報取得・引け処理")
         self.check_morning(now, opening)
         self.check_deadline(now)
         self.check_evening(now)
@@ -566,7 +566,7 @@ class PlanDashboard:
                     if at.time() < time(9):
                         self.schedule_label.set(
                             f"寄付前の未確定分を {at:%H:%M} に再確認　　"
-                            "18:00 日足保存　　20:10 引け処理"
+                            "平日22:00 日足保存・情報取得・引け処理"
                         )
                     return
         if recovery.get("status") == "ok":
