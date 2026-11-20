@@ -250,10 +250,15 @@ def check_time(receipt, field, day):
     return stamp.strftime("%H:%M:%S" if stamp.date().isoformat() == day else "%m/%d %H:%M:%S")
 
 
+def morning_text(value):
+    # Use the current wording for saved receipts without rewriting their evidence.
+    return (value or "").replace("以前の確定判定を使用", "確定判定を使用")
+
+
 def morning_evidence(report, day, issue, expired=False):
     if issue:
         return f"対象寄付日 {day}　　{issue}"
-    title = report.get("label") or "判定状態を確認してください"
+    title = morning_text(report.get("label")) or "判定状態を確認してください"
     if expired and report.get("state") == "pending":
         title = "期限経過・寄付前の両プラン確定を確認できません"
     return (
@@ -270,7 +275,7 @@ def plan_evidence(report, key, expired=False):
         return ""
     day = report["target"]
     stamp = check_time(result, "decision_at", day)
-    label = result.get("label") or "判定待ち"
+    label = morning_text(result.get("label")) or "判定待ち"
     if expired and result.get("state") == "pending":
         label = "期限経過・確定記録なし"
     line = f"{key}　{label}　　確定 {stamp}"
@@ -714,7 +719,7 @@ class PlanDashboard:
         if plan.get("decision_status") == "ready":
             count = len(plan.get("picks", []))
         evidence = self.morning.get("plans", {}).get(key)
-        source = evidence.get("source_note") if isinstance(evidence, dict) else None
+        source = morning_text(evidence.get("source_note")) if isinstance(evidence, dict) else None
         self.detail.set(
             f"{key}　{plan.get('name', '')}　　現金 {yen(plan.get('cash'))}　　"
             f"最終判定 {plan.get('last_decision') or '未判定'}"

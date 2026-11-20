@@ -19,7 +19,7 @@ LABELS = {
     "met": "朝の起動だけで寄付前に確定",
     "prior_inputs": "寄付前に確定・起動前の受領資料を使用",
     "evening_run": "寄付前に確定・前夜にも起動",
-    "preexisting": "以前の確定判定を使用",
+    "preexisting": "確定判定を使用",
     "pending": "寄付前の確定待ち",
     "missed": "寄付前に間に合わず",
     "unverified": "記録不足で確認できず",
