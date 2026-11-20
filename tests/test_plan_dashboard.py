@@ -50,10 +50,10 @@ def test_reported_marks_and_frozen_empty_decision_differ_from_missing_inputs():
     assert dashboard.clock_label("2026-11-18T23:30:00+00:00") == "2026-11-19 08:30 JST"
 
 
-@pytest.mark.parametrize("hh,expected", [(8, 1), (11, 1), (13, 0)])
-def test_dashboard_starts_in_background_and_shows_real_receipts(
-    tmp_path, monkeypatch, hh, expected
-):
+@pytest.mark.parametrize(
+    "day,hh", [(19, 6), (19, 8), (19, 11), (19, 13), (19, 18), (19, 21), (21, 8), (23, 8)]
+)
+def test_dashboard_starts_in_background_and_shows_real_receipts(tmp_path, monkeypatch, day, hh):
     window = create_window(tk)
     window.withdraw()
     try:
@@ -61,7 +61,7 @@ def test_dashboard_starts_in_background_and_shows_real_receipts(
         notebook.pack()
         save(tmp_path / "config/forward-plans.json", {"plans": []})
         fake_clock = Mock()
-        fake_clock.now.return_value = datetime(2026, 11, 19, hh, tzinfo=dashboard.JST)
+        fake_clock.now.return_value = datetime(2026, 11, day, hh, tzinfo=dashboard.JST)
         monkeypatch.setattr(
             dashboard,
             "datetime",
@@ -115,17 +115,15 @@ def test_dashboard_starts_in_background_and_shows_real_receipts(
         monkeypatch.setattr(dashboard, "spawn_catchup", spawn)
         view = dashboard.PlanDashboard(notebook, tmp_path, lambda _: False)
         assert view.timer in window.tk.call("after", "info")
-        view.frame.after_cancel(view.timer)
-        view.on_startup()
-        assert spawn.call_count == expected
+        window.update_idletasks()  # Run the real window-opening callback.
+        spawn.assert_called_once_with(tmp_path, "--catch-up")
+        assert "実行中" in view.recovery_label.get()
         assert view.accounts.get_children() == ("A", "B")
         assert "開始残高" in view.accounts.item("A", "values")
         assert "判定済・候補0" in view.accounts.item("B", "values")
         assert "最終判定 未判定" in view.detail.get()
         assert "日証金未着" in view.detail.get()
         assert view.recovery.item("daily", "values")[2] == "今回処理済み"
-        if not expected:
-            assert "前回の処理が途中で終了" in view.recovery_label.get()
         view.start()
         view.start()
         assert spawn.call_count == 1 and view.restore_button.instate(["disabled"])
@@ -138,6 +136,55 @@ def test_dashboard_starts_in_background_and_shows_real_receipts(
         (root / "summary.json").write_bytes(b"broken")
         view.refresh()
         assert not view.accounts.get_children() and "読込エラー" in view.checked.get()
+    finally:
+        window.destroy()
+
+
+@pytest.mark.parametrize("state", ["completed", "external_worker", "unconfigured", "launch_error"])
+def test_opening_rechecks_completed_work_and_respects_active_worker(tmp_path, monkeypatch, state):
+    now = datetime(2026, 11, 19, 6, 30, tzinfo=dashboard.JST)
+    monkeypatch.setattr(
+        dashboard,
+        "datetime",
+        type("Clock", (datetime,), {"now": classmethod(lambda cls, tz: now)}),
+    )
+    if state != "unconfigured":
+        save(tmp_path / "config/forward-plans.json", {"plans": []})
+    save(
+        tmp_path / "data/plan-forward/recovery/latest.json",
+        dict(status="ok", target="2026-11-18", started_at=now.isoformat()),
+    )
+    spawn = Mock()
+    spawn.return_value.poll.return_value = None
+    if state == "launch_error":
+        spawn.side_effect = OSError("unavailable Python")
+    monkeypatch.setattr(dashboard, "spawn_catchup", spawn)
+    window = create_window(tk)
+    window.withdraw()
+    try:
+        notebook = ttk.Notebook(window)
+        notebook.pack()
+        view = dashboard.PlanDashboard(notebook, tmp_path, lambda _: state == "external_worker")
+        window.update_idletasks()
+        if state in {"external_worker", "unconfigured"}:
+            spawn.assert_not_called()
+        else:
+            spawn.assert_called_once_with(tmp_path, "--catch-up")
+        if state in {"external_worker", "completed"}:
+            assert "実行中" in view.recovery_label.get()
+            assert view.restore_button.instate(["disabled"])
+        elif state == "launch_error":
+            assert "起動できません" in view.recovery_label.get()
+            assert view.restore_button.instate(["!disabled"])
+        # Refreshing the displayed state does not start a second worker.
+        view.frame.after_cancel(view.timer)
+        view.tick()
+        assert spawn.call_count == (0 if state in {"external_worker", "unconfigured"} else 1)
+        if state == "launch_error":
+            spawn.side_effect = None
+            view.open_program()
+            assert spawn.call_count == 2
+            assert "実行中" in view.recovery_label.get()
     finally:
         window.destroy()
 

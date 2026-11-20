@@ -475,7 +475,11 @@ class PlanDashboard:
             self.timer = None
 
     def on_startup(self):
-        self.tick(opening=True)
+        # Opening the tool has the same effect as the program button, at any hour.
+        # start() shares the worker/dispatch lock checks with manual and timed runs.
+        if (self.project / "config/forward-plans.json").is_file():
+            self.open_program()
+        self.tick()
 
     def tick(self, opening=False):
         self.refresh()
