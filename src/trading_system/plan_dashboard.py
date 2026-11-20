@@ -399,11 +399,32 @@ class PlanDashboard:
             ],
             height=2,
         )
+        self.account_field = "plan"
+        for key in self.accounts["columns"]:
+            self.accounts.heading(key, command=lambda field=key: self.select_account_field(field))
         self.accounts.bind("<<TreeviewSelect>>", lambda _e: self.show_account())
+        ttk.Label(
+            tab, text="A・Bの行を選び、項目名（純資産・保有数など）を押すと詳細を表示します。"
+        ).pack(anchor="w", pady=(4, 0))
         self.detail = tk.StringVar(master=tab)
-        ttk.Label(tab, textvariable=self.detail, justify="left", wraplength=815).pack(
-            anchor="w", pady=(7, 12)
+        self.detail_box = ttk.LabelFrame(tab, text="口座の詳細", padding=(8, 4))
+        self.detail_box.pack(fill="x", pady=(4, 10))
+        self.detail_text = tk.Text(
+            self.detail_box,
+            height=4,
+            wrap="word",
+            state="disabled",
+            relief="flat",
+            cursor="arrow",
+            takefocus=True,
         )
+        detail_scroll = ttk.Scrollbar(
+            self.detail_box, orient="vertical", command=self.detail_text.yview
+        )
+        self.detail_text.configure(yscrollcommand=detail_scroll.set)
+        self.detail_text.pack(side="left", fill="both", expand=True)
+        detail_scroll.pack(side="right", fill="y")
+        self.detail.trace_add("write", lambda *_: self.render_account_detail())
 
         rec = ttk.LabelFrame(tab, text="夜間処理の確認・復旧", padding=(10, 6))
         rec.pack(fill="both", expand=True)
@@ -719,6 +740,7 @@ class PlanDashboard:
             plans = {}
         self.refresh_holdings(plans, now)
         if values == self.last_values:
+            self.show_account()  # A newly saved price may update holdings without changing NAV.
             return
         self.last_values = values
         self.morning = proof
@@ -786,20 +808,40 @@ class PlanDashboard:
                 self.recovery.insert("", "end", iid=key, values=fields)
         self.show_step()
 
+    def select_account_field(self, field):
+        self.account_field = field
+        self.show_account()
+        self.detail_text.yview_moveto(0)
+
+    def render_account_detail(self):
+        self.detail_text.configure(state="normal")
+        self.detail_text.delete("1.0", "end")
+        self.detail_text.insert("1.0", self.detail.get())
+        self.detail_text.configure(state="disabled")
+
     def show_account(self):
         chosen = self.accounts.selection()
         if not chosen:
-            self.detail.set("口座の集計記録を待っています。")
-            return
-        key = chosen[0]
+            self.detail_box.configure(text="口座の詳細")
+            value = "口座の集計記録を待っています。"
+        else:
+            key = chosen[0]
+            field = self.account_field
+            self.detail_box.configure(text=f"{self.accounts.heading(field, 'text')} — {key}プラン")
+            value = self.account_detail(key, field)
+        if self.detail.get() != value:
+            self.detail.set(value)
+
+    def account_detail(self, key, field):
         plan = self.plans.get(key, {})
+        line = account_line(plan)
         issue = plan.get("issue") or plan.get("reason")
         count = plan.get("candidates")
         if plan.get("decision_status") == "ready":
             count = len(plan.get("picks", []))
         evidence = self.morning.get("plans", {}).get(key)
         source = morning_text(evidence.get("source_note")) if isinstance(evidence, dict) else None
-        self.detail.set(
+        summary = (
             f"{key}　{plan.get('name', '')}　　現金 {yen(plan.get('cash'))}　　"
             f"最終判定 {plan.get('last_decision') or '未判定'}"
             + (f"　　候補 {count}銘柄" if count is not None else "")
@@ -807,6 +849,64 @@ class PlanDashboard:
             + (f"\n{issue}" if issue else "")
             + (f"\n朝の判定根拠　{source}" if source else "")
         )
+        if field == "plan":
+            return summary
+        if field == "state":
+            return f"判定・処理状態　{line[0]}\n対象寄付日　{line[5]}\n" + summary
+        if field == "nav":
+            return (
+                f"純資産　{line[1]}\n最終評価日　{line[4]}\n"
+                f"口座集計の現金　{yen(plan.get('cash'))}\n"
+                f"開始資金　{yen(plan.get('capital'))}"
+            )
+        if field == "net":
+            return (
+                f"評価損益　{line[2]}\n"
+                f"純資産 {line[1]} − 開始資金 {yen(plan.get('capital'))}\n"
+                f"最終評価日　{line[4]}\n口座に記帳済みの費用を反映した評価です。"
+            )
+        if field == "mark":
+            return (
+                f"最終評価日　{line[4]}\n純資産　{line[1]}\n評価損益　{line[2]}\n"
+                "保存済みの口座評価の日付です。保有銘柄の終値の日付とは別に確認してください。"
+            )
+        if field == "entry":
+            rows = [
+                f"対象寄付日　{line[5]}",
+                f"対象選定日　{plan.get('next_signal') or plan.get('last_decision') or '未確認'}",
+                f"確定時刻　{clock_label(plan.get('decision_recorded_at'))}",
+                summary,
+            ]
+            if plan.get("picks"):
+                rows.append("保存済みの候補銘柄")
+                rows.extend(f"{p['code']}　{p.get('name', '')}" for p in plan["picks"])
+            return "\n".join(rows)
+        data = self.last_holdings or {}
+        held = [row for row in data.get("rows", []) if row["plan"] == key]
+        rows = [f"保有数　{line[3]}銘柄"]
+        if not held:
+            rows.append(
+                "現在の保有銘柄はありません。" if line[3] == "0" else "保有明細を確認できません。"
+            )
+        for row in held:
+            code = row["code"]
+            code = code[:-1] if len(code) == 5 and code.endswith("0") else code
+            prices = [
+                "未確認" if positive(row[k]) is None else share_price(row[k]) + "円"
+                for k in ("entry_price", "current_price")
+            ]
+            rows.extend(
+                [
+                    f"{code}　{row['name']}　{share_price(row['shares'])}株",
+                    f"取得価格 {prices[0]}　最新終値 {prices[1]}"
+                    f"（{row['price_date'] or '日付未確認'}）",
+                ]
+            )
+            if row.get("note"):
+                rows.append(row["note"])
+        if held and data.get("issue"):
+            rows.append(data["issue"])
+        return "\n".join(rows)
 
     def show_step(self):
         keys = self.recovery.selection()

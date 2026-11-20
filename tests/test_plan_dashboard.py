@@ -470,3 +470,139 @@ def test_holdings_tab_updates_prices_without_changing_account_snapshot(tmp_path,
         assert "A：保有0銘柄" in view.holdings_status.get()
     finally:
         window.destroy()
+
+
+def test_all_account_headings_show_selected_account_details_and_follow_updates(
+    tmp_path, monkeypatch
+):
+    save(
+        tmp_path / "data/plan-forward/summary.json",
+        dict(
+            plans={
+                "A": dict(
+                    name="基準③",
+                    capital=3000000,
+                    cash=2900000,
+                    nav=3010100,
+                    positions={"12340": {}},
+                    last_mark="2026-11-19",
+                    next_entry="2026-11-20",
+                    status="waiting_close",
+                    decision_status="ready",
+                    last_decision="2026-11-19",
+                    picks=[dict(code="12340", name="テスト銘柄")],
+                    decision_recorded_at="2026-11-19T20:10:00+09:00",
+                ),
+                "B": dict(
+                    name="A0-5",
+                    capital=3000000,
+                    cash=2999950,
+                    nav=2999950,
+                    positions=0,
+                    last_mark="2026-11-20",
+                    next_entry="2026-11-24",
+                    status="waiting_inputs",
+                    issue="入力待ち",
+                ),
+            }
+        ),
+    )
+    window = create_window(tk)
+    window.withdraw()
+    try:
+        notebook = ttk.Notebook(window)
+        notebook.pack()
+        view = dashboard.PlanDashboard(notebook, tmp_path, lambda _: False)
+        holdings = dict(
+            rows=[
+                dict(
+                    plan="A",
+                    code="12340",
+                    name="テスト銘柄",
+                    shares="100",
+                    entry_price="1000",
+                    current_price="1020.5",
+                    price_date="2026-11-20",
+                    entry_date="2026-11-19",
+                    note="",
+                )
+            ],
+            status="A：保有1銘柄　　B：保有0銘柄",
+            issue="",
+        )
+        reader = Mock(return_value=holdings)
+        monkeypatch.setattr(view.holdings_reader, "read", reader)
+        window.update_idletasks()
+        expected = {
+            "plan": "基準③",
+            "state": "寄付候補確定",
+            "nav": "純資産　3,010,100円",
+            "net": "評価損益　10,100円",
+            "hold": "テスト銘柄",
+            "mark": "最終評価日　2026-11-19",
+            "entry": "対象寄付日　2026-11-20",
+        }
+
+        def click(field):
+            callback = view.accounts.heading(field, "command")
+            assert callback
+            window.tk.call(callback)
+            assert view.detail_text.get("1.0", "end-1c") == view.detail.get()
+            assert str(view.detail_text["state"]) == "disabled"
+
+        for field, content in expected.items():
+            click(field)
+            assert content in view.detail.get()
+            assert (
+                view.detail_box.cget("text") == view.accounts.heading(field, "text") + " — Aプラン"
+            )
+        assert "保存済みの候補銘柄" in view.detail.get()
+
+        # Selecting another account updates the same active field, without another heading click.
+        view.accounts.selection_set("B")
+        window.update()
+        assert "対象寄付日　2026-11-24" in view.detail.get()
+        assert view.detail_box.cget("text").endswith("Bプラン")
+        click("net")
+        assert "評価損益　-50円" in view.detail.get()
+        click("hold")
+        assert "現在の保有銘柄はありません。" in view.detail.get()
+        assert "テスト銘柄" not in view.detail.get()
+
+        view.accounts.selection_set("A")
+        window.update()
+        assert "1,020.5円" in view.detail.get()
+        reader.return_value = dict(
+            holdings, rows=[dict(holdings["rows"][0], current_price="1100.5")]
+        )
+        view.refresh()
+        assert "1,100.5円" in view.detail.get()
+        reader.return_value = dict(holdings, rows=[])
+        view.refresh()
+        assert "保有明細を確認できません。" in view.detail.get()
+        assert "現在の保有銘柄はありません。" not in view.detail.get()
+    finally:
+        window.destroy()
+
+
+def test_heading_clicked_before_accounts_arrive_keeps_its_selection(tmp_path):
+    window = create_window(tk)
+    window.withdraw()
+    try:
+        notebook = ttk.Notebook(window)
+        notebook.pack()
+        view = dashboard.PlanDashboard(notebook, tmp_path, lambda _: False)
+        window.update_idletasks()
+        window.tk.call(view.accounts.heading("net", "command"))
+        assert "集計記録を待っています" in view.detail.get()
+        save(
+            tmp_path / "data/plan-forward/summary.json",
+            dict(
+                plans={"B": dict(name="B", status="waiting_inputs", capital=3000000, positions=0)}
+            ),
+        )
+        view.refresh()
+        assert view.detail_box.cget("text") == "評価損益 — Bプラン"
+        assert "評価損益　—" in view.detail.get()
+    finally:
+        window.destroy()
