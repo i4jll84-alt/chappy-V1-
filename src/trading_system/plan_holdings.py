@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 import duckdb
 
+from trading_system.plan_performance import performance
 from trading_system.research.daytrade_universe import dated_inputs
 
 JST = ZoneInfo("Asia/Tokyo")
@@ -81,6 +82,8 @@ def positions(project, key, plan):
                     shares=positive(p.get("shares")),
                     entry_date=p.get("entered"),
                     entry_price=entry,
+                    acquisition_cost=positive(p.get("debit")),
+                    holding_date=plan.get("last_mark"),
                     note="分割・併合あり（取得時価格）"
                     if entry and adjusted and entry != adjusted
                     else "",
@@ -132,6 +135,8 @@ def positions(project, key, plan):
                 shares=shares,
                 entry_date=p["entry_date"],
                 entry_price=positive(buy.get("price")),
+                acquisition_cost=positive(p.get("cost")),
+                holding_date=max(plan.get("last_mark") or "", state.get("last_open") or "") or None,
                 note=note,
             )
         )
@@ -164,6 +169,17 @@ def holdings_snapshot(project, plans, now):
             notes.append("取得価格未確認")
         if current is None:
             notes.append("終値欠損" if day else "終値未確認")
+        net, percent = None, None
+        if row["acquisition_cost"] is None:
+            notes.append("取得総額未確認")
+        elif row["shares"] is None:
+            notes.append("株数未確認")
+        elif day and row["holding_date"] != day:
+            # Do not mix an unprocessed split (or an older price) with these shares.
+            notes.append("損益未確認（保有評価日と終値日が不一致）")
+        elif current is not None:
+            net, percent = performance(current * row["shares"], row["acquisition_cost"])
+        row.update(net=net, return_pct=percent)
         row["note"] = "／".join(notes)
     return dict(rows=rows, status="　　".join(statuses), issue=issue)
 

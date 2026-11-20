@@ -41,7 +41,11 @@ def market(monkeypatch):
 def a_plan():
     return dict(
         last_mark="2026-11-20",
-        positions={"12340": dict(quote="1000", entry="500", shares="200", entered="2026-11-19")},
+        positions={
+            "12340": dict(
+                quote="1000", entry="500", shares="200", debit="100060", entered="2026-11-19"
+            )
+        },
     )
 
 
@@ -56,7 +60,9 @@ def b_plan(project):
         dict(Code="56780", side="BUY", date="2026-11-18", status="仮想約定", price=900, shares=100),
     ]
     ledger.save(root, state)
-    plan = dict(capital=3_000_000, native_revision=state["revision"], positions=1)
+    plan = dict(
+        capital=3_000_000, native_revision=state["revision"], positions=1, last_mark="2026-11-20"
+    )
     state["positions"] = []  # A newer native revision must not leak into an older summary.
     ledger.save(root, state)
     return plan, root / "ledger.sqlite"
@@ -81,6 +87,11 @@ def test_matches_both_ledgers_and_uses_original_fill_price_without_rewriting(tmp
     )
     assert all("分割・併合" in row["note"] for row in result["rows"])
     assert all(row["price_date"] == "2026-11-20" for row in result["rows"])
+    # Splits preserve total acquisition cost; the original quote is not today's unit cost.
+    assert a_row["net"] == Decimal("10040")
+    assert a_row["return_pct"] == Decimal("10040") / Decimal("100060") * 100
+    assert b_row["net"] == Decimal("103949.95")
+    assert b_row["return_pct"] == Decimal("103949.95") / Decimal("100150.05") * 100
     assert hashlib.sha256(db.read_bytes()).hexdigest() == digest
 
 
@@ -153,3 +164,22 @@ def test_cache_refreshes_on_saved_price_poll_or_account_change(tmp_path, monkeyp
     plans["A"]["positions"] = {}
     reader.read(plans, now())
     assert load.call_count == 3
+
+
+@pytest.mark.parametrize("missing", ["debit", "shares", "mark", "older_mark", "future_mark"])
+def test_holdings_profit_needs_verified_cost_and_matching_share_price_dates(
+    tmp_path, monkeypatch, missing
+):
+    receipt(tmp_path, "2026-11-20")
+    market(monkeypatch)
+    plan = a_plan()
+    if missing in ("debit", "shares"):
+        del plan["positions"]["12340"][missing]
+    else:
+        plan["last_mark"] = {"mark": None, "older_mark": "2026-11-19", "future_mark": "2026-11-24"}[
+            missing
+        ]
+    row = h.holdings_snapshot(tmp_path, {"A": plan}, now())["rows"][0]
+    assert row["net"] is None and row["return_pct"] is None
+    assert "未確認" in row["note"]
+    assert row["current_price"] == Decimal("550.5")

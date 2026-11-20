@@ -26,7 +26,7 @@ def test_reported_marks_and_frozen_empty_decision_differ_from_missing_inputs():
     assert dashboard.account_line(dict(held, status="ready", candidates=0)) == (
         "判定済・候補0",
         "3,010,000円",
-        "10,000円",
+        "+10,000円（+0.33%）",
         "0",
         "2026-11-18",
         "2026-11-20",
@@ -433,6 +433,8 @@ def test_holdings_tab_updates_prices_without_changing_account_snapshot(tmp_path,
                     shares="100",
                     entry_price="1000.125",
                     current_price="1020.5",
+                    net="1950",
+                    return_pct="1.95",
                     price_date="2026-11-20",
                     entry_date="2026-11-19",
                     note="",
@@ -456,12 +458,29 @@ def test_holdings_tab_updates_prices_without_changing_account_snapshot(tmp_path,
             "100",
             "1,000.125",
             "1,020.5",
+            "+1,950円（+1.95%）",
             "2026-11-20",
             "2026-11-19",
             "",
         )
         assert "B：保有0銘柄" in view.holdings_status.get()
-        reader.return_value = dict(data, rows=[dict(data["rows"][0], current_price=None)])
+        item = view.holdings.get_children()[0]
+        assert view.holdings.item(item, "tags") == ("gain",)
+        for amount, rate, tag, label in [
+            ("-100", "-0.1", "loss", "-100円（-0.10%）"),
+            ("0", "0", "neutral", "0円（0.00%）"),
+            (None, None, "neutral", "—"),
+        ]:
+            reader.return_value = dict(
+                data, rows=[dict(data["rows"][0], net=amount, return_pct=rate)]
+            )
+            view.refresh()
+            item = view.holdings.get_children()[0]
+            assert view.holdings.item(item, "tags") == (tag,)
+            assert view.holdings.set(item, "net") == label
+        reader.return_value = dict(
+            data, rows=[dict(data["rows"][0], current_price=None, net=None, return_pct=None)]
+        )
         view.refresh()
         assert view.holdings.item(view.holdings.get_children()[0], "values")[5] == "未確認"
         reader.return_value = dict(data, rows=[], status="A：保有0銘柄　　B：保有0銘柄")
@@ -522,6 +541,8 @@ def test_all_account_headings_show_selected_account_details_and_follow_updates(
                     shares="100",
                     entry_price="1000",
                     current_price="1020.5",
+                    net="1950",
+                    return_pct="1.95",
                     price_date="2026-11-20",
                     entry_date="2026-11-19",
                     note="",
@@ -537,7 +558,7 @@ def test_all_account_headings_show_selected_account_details_and_follow_updates(
             "plan": "基準③",
             "state": "寄付候補確定",
             "nav": "純資産　3,010,100円",
-            "net": "評価損益　10,100円",
+            "net": "評価損益　+10,100円（+0.34%）",
             "hold": "テスト銘柄",
             "mark": "最終評価日　2026-11-19",
             "entry": "対象寄付日　2026-11-20",
@@ -564,7 +585,16 @@ def test_all_account_headings_show_selected_account_details_and_follow_updates(
         assert "対象寄付日　2026-11-24" in view.detail.get()
         assert view.detail_box.cget("text").endswith("Bプラン")
         click("net")
-        assert "評価損益　-50円" in view.detail.get()
+        assert "評価損益　-50円（-0.00%）" in view.detail.get()
+        assert view.accounts.item("A", "tags") == ("gain",)
+        assert view.accounts.item("B", "tags") == ("loss",)
+        assert str(view.accounts.tag_configure("gain", "foreground")) == "#b91c1c"
+        assert str(view.accounts.tag_configure("loss", "foreground")) == "#1d4ed8"
+        assert view.detail_text.tag_names("1.0") == ("loss",)
+        assert view.detail_text.tag_cget("loss", "foreground") == "#1d4ed8"
+        style = ttk.Style(window)
+        assert style.map("Profit.Treeview", "foreground") == [("disabled", "#777777")]
+        assert style.lookup("Profit.Treeview", "background", ("selected",)) == "#e7edf6"
         click("hold")
         assert "現在の保有銘柄はありません。" in view.detail.get()
         assert "テスト銘柄" not in view.detail.get()
@@ -602,7 +632,33 @@ def test_heading_clicked_before_accounts_arrive_keeps_its_selection(tmp_path):
             ),
         )
         view.refresh()
-        assert view.detail_box.cget("text") == "評価損益 — Bプラン"
+        assert view.detail_box.cget("text") == "評価損益・率 — Bプラン"
         assert "評価損益　—" in view.detail.get()
+    finally:
+        window.destroy()
+
+
+def test_account_colour_refreshes_with_the_saved_value_and_clears_when_unknown(tmp_path):
+    root = tmp_path / "data/plan-forward/summary.json"
+    window = create_window(tk)
+    window.withdraw()
+    try:
+        notebook = ttk.Notebook(window)
+        notebook.pack()
+        view = dashboard.PlanDashboard(notebook, tmp_path, lambda _: False)
+        window.update_idletasks()
+        view.select_account_field("net")
+        for nav, label, tag in [
+            (1010000, "+10,000円（+1.00%）", "gain"),
+            (990000, "-10,000円（-1.00%）", "loss"),
+            (1000000, "0円（0.00%）", "neutral"),
+            (None, "—", "neutral"),
+        ]:
+            save(root, dict(plans={"A": dict(capital=1000000, nav=nav, positions={})}))
+            view.refresh()
+            assert view.accounts.set("A", "net") == label
+            assert view.accounts.item("A", "tags") == (tag,)
+            assert view.detail_text.tag_names("1.0") == (tag,)
+            assert f"評価損益　{label}" in view.detail.get()
     finally:
         window.destroy()

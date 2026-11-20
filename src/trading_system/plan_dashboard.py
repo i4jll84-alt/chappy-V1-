@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 from trading_system.plan_forward import STATUS_LABELS
 from trading_system.plan_holdings import HoldingsReader, positive
+from trading_system.plan_performance import PROFIT_COLOURS, performance, profit_display, profit_tag
 from trading_system.plan_schedule import EVENING_CHECK
 
 JST = ZoneInfo("Asia/Tokyo")
@@ -133,15 +134,12 @@ def account_line(plan):
     if isinstance(count, (dict, list)):
         count = len(count)
     nav = plan.get("nav")
-    try:
-        net = None if nav is None else Decimal(str(nav)) - Decimal(str(plan["capital"]))
-    except (KeyError, TypeError, InvalidOperation):
-        net = None
+    net, percent = performance(nav, plan.get("capital"))
     mark = plan.get("last_mark") or ("開始残高" if nav is not None else "未評価")
     return (
         label,
         yen(nav),
-        yen(net),
+        profit_display(net, percent),
         "—" if count is None else str(count),
         mark,
         plan.get("next_entry") or "—",
@@ -346,13 +344,15 @@ class PlanDashboard:
                 ("plan", "口座", 70),
                 ("state", "判定・処理状態", 170),
                 ("nav", "純資産", 100),
-                ("net", "評価損益", 95),
+                ("net", "評価損益・率", 205),
                 ("hold", "保有数", 54),
                 ("mark", "最終評価日", 98),
                 ("entry", "対象寄付日", 100),
             ],
             height=2,
         )
+        self.profit_colours(self.accounts)
+        self.accounts.column("net", minwidth=175)
         self.account_field = "plan"
         for key in self.accounts["columns"]:
             self.accounts.heading(key, command=lambda field=key: self.select_account_field(field))
@@ -378,6 +378,8 @@ class PlanDashboard:
         self.detail_text.configure(yscrollcommand=detail_scroll.set)
         self.detail_text.pack(side="left", fill="both", expand=True)
         detail_scroll.pack(side="right", fill="y")
+        for tag, colour in PROFIT_COLOURS.items():
+            self.detail_text.tag_configure(tag, foreground=colour)
         self.detail.trace_add("write", lambda *_: self.render_account_detail())
 
         rec = ttk.LabelFrame(tab, text="夜間処理の確認・復旧", padding=(10, 6))
@@ -433,6 +435,21 @@ class PlanDashboard:
         scroll.pack(side="right", fill="y")
         return tree
 
+    @staticmethod
+    def profit_colours(tree):
+        from tkinter import ttk
+
+        style = ttk.Style(tree)
+        # Keep gain/loss colours readable even when the row is selected.
+        style.map(
+            "Profit.Treeview",
+            foreground=[("disabled", "#777777")],
+            background=[("selected", "#e7edf6")],
+        )
+        tree.configure(style="Profit.Treeview")
+        for tag, colour in PROFIT_COLOURS.items():
+            tree.tag_configure(tag, foreground=colour)
+
     def add_holdings(self, notebook):
         import tkinter as tk
         from tkinter import ttk
@@ -453,6 +470,7 @@ class PlanDashboard:
                 ("shares", "株数", 65),
                 ("entry_price", "取得価格（円）", 110),
                 ("current_price", "現在価格（円）", 110),
+                ("net", "評価損益・率", 205),
                 ("price_date", "終値の日付", 105),
                 ("entry_date", "取得日", 105),
                 ("note", "備考", 220),
@@ -460,9 +478,10 @@ class PlanDashboard:
             height=12,
             expand=True,
         )
+        self.profit_colours(self.holdings)
         for key in self.holdings["columns"]:
             self.holdings.column(key, stretch=False)
-        for key in ("shares", "entry_price", "current_price"):
+        for key in ("shares", "entry_price", "current_price", "net"):
             self.holdings.column(key, anchor="e")
         scroll = ttk.Scrollbar(tab, orient="horizontal", command=self.holdings.xview)
         scroll.pack(fill="x")
@@ -470,7 +489,8 @@ class PlanDashboard:
         ttk.Label(
             tab,
             text="現在価格は保存済み日足の最新終値です。終値の日付を確認してください。\n"
-            "取得価格は費用を除く仮想約定価格です。取得後の分割・併合は備考に表示します。",
+            "評価損益・率は購入時費用込みの取得総額が基準です。売却前のため売却費用は含みません。\n"
+            "プラスは赤、マイナスは青、ゼロ・未確認は通常色です。分割・併合は備考に表示します。",
             wraplength=800,
             justify="left",
         ).pack(anchor="w", pady=(10, 0))
@@ -491,6 +511,7 @@ class PlanDashboard:
             self.holdings.insert(
                 "",
                 "end",
+                tags=(profit_tag(row.get("net")),),
                 values=(
                     row["plan"],
                     display_code,
@@ -498,6 +519,7 @@ class PlanDashboard:
                     share_price(row["shares"]),
                     share_price(row["entry_price"]),
                     share_price(row["current_price"]),
+                    profit_display(row.get("net"), row.get("return_pct")),
                     row["price_date"] or "未確認",
                     row["entry_date"] or "未確認",
                     row["note"],
@@ -693,10 +715,12 @@ class PlanDashboard:
                 self.accounts.delete(key)
         for key, p in self.plans.items():
             row = (key + "プラン", *account_line(p))
+            net, _ = performance(p.get("nav"), p.get("capital"))
+            tags = (profit_tag(net),)
             if self.accounts.exists(key):
-                self.accounts.item(key, values=row)
+                self.accounts.item(key, values=row, tags=tags)
             else:
-                self.accounts.insert("", "end", iid=key, values=row)
+                self.accounts.insert("", "end", iid=key, values=row, tags=tags)
         if not self.accounts.selection() and self.accounts.get_children():
             self.accounts.selection_set(self.accounts.get_children()[0])
         self.show_account()
@@ -748,6 +772,17 @@ class PlanDashboard:
         self.detail_text.configure(state="normal")
         self.detail_text.delete("1.0", "end")
         self.detail_text.insert("1.0", self.detail.get())
+        for index, line in enumerate(self.detail.get().splitlines(), 1):
+            if line.startswith("評価損益　"):
+                value = line.removeprefix("評価損益　")
+                tag = (
+                    "gain"
+                    if value.startswith("+")
+                    else "loss"
+                    if value.startswith("-")
+                    else "neutral"
+                )
+                self.detail_text.tag_add(tag, f"{index}.0", f"{index}.end")
         self.detail_text.configure(state="disabled")
 
     def show_account(self):
@@ -794,7 +829,8 @@ class PlanDashboard:
             return (
                 f"評価損益　{line[2]}\n"
                 f"純資産 {line[1]} − 開始資金 {yen(plan.get('capital'))}\n"
-                f"最終評価日　{line[4]}\n口座に記帳済みの費用を反映した評価です。"
+                f"最終評価日　{line[4]}\n損益率は開始資金が基準です。"
+                "口座に記帳済みの費用を反映しています。"
             )
         if field == "mark":
             return (
@@ -831,6 +867,7 @@ class PlanDashboard:
                     f"{code}　{row['name']}　{share_price(row['shares'])}株",
                     f"取得価格 {prices[0]}　最新終値 {prices[1]}"
                     f"（{row['price_date'] or '日付未確認'}）",
+                    f"評価損益　{profit_display(row.get('net'), row.get('return_pct'))}",
                 ]
             )
             if row.get("note"):
