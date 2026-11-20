@@ -212,7 +212,7 @@ def test_supplemental_does_not_create_past_orders_or_a_late_panel(tmp_path, monk
     assert result["steps"]["intraday_panel"]["status"] == "missed"
     assert all(day < when for day, cap, when in calls)
     assert {cap for day, cap, when in calls} == set(recovery.a0_5.A0_5_PAPER_CAPITALS)
-    assert result["steps"]["legacy_close"]["status"] == "skipped"
+    assert "legacy_close" not in result["steps"] and "review" not in result["steps"]
 
 
 def test_evening_b_skips_prestart_and_recovers_missing_native_plan(tmp_path, monkeypatch):

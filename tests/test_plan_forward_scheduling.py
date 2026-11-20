@@ -13,38 +13,24 @@ def fake_runner(monkeypatch, due):
     monkeypatch.setitem(sys.modules, "trading_system.plan_forward", SimpleNamespace(run_due=due))
 
 
-@pytest.mark.parametrize("action,expected", [("evening", True), ("review", False)])
-def test_existing_heartbeat_advances_after_legacy_job(
-    monkeypatch, capsys, tmp_path, action, expected
+@pytest.mark.parametrize(
+    ("action", "hour"), [("morning", 8), ("record-agent", 8), ("evening", 19), ("evening", 21)]
+)
+def test_retired_scheduler_commands_exit_without_starting_any_job(
+    monkeypatch, capsys, tmp_path, action, hour
 ):
-    calls = []
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         swing_forward,
         "datetime",
-        SimpleNamespace(now=lambda tz: datetime(2026, 11, 19, 19, 0, tzinfo=tz)),
+        SimpleNamespace(now=lambda tz: datetime(2026, 11, 24, hour, 0, tzinfo=tz)),
     )
     monkeypatch.setattr(sys, "argv", ["swing_forward", action])
-
-    def legacy(project, name, answer):
-        assert project == tmp_path and name == action
-        calls.append("legacy")
-        return {"state": action, "input_sha256": "preserved"}
-
-    monkeypatch.setattr(swing_forward, "run", legacy)
-
-    def failed_plan(project):
-        calls.append("plans")
-        raise RuntimeError("independent paper failure")
-
-    fake_runner(monkeypatch, failed_plan)
+    monkeypatch.setattr(swing_forward, "run", lambda *a: pytest.fail("retired job"))
+    fake_runner(monkeypatch, lambda *a: pytest.fail("unexpected scheduled job"))
     assert swing_forward.main() == 0
-    report = json.loads(capsys.readouterr().out)
-    assert report["input_sha256"] == "preserved"
-    assert ("plan_forward" in report) == expected
-    if expected:
-        assert report["plan_forward"] == {"status": "error", "error_type": "RuntimeError"}
-    assert calls == (["legacy", "plans"] if expected else ["legacy"])
+    assert json.loads(capsys.readouterr().out) == {"action": action, "state": "retired"}
+    assert not (tmp_path / "data").exists()
 
 
 @pytest.mark.parametrize("scheduled", [True, False])

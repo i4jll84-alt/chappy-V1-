@@ -4,14 +4,13 @@ import hashlib
 import json
 import sqlite3
 from contextlib import closing
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from time import monotonic, sleep
 
 from trading_system.brokers.locking import single_writer
 from trading_system.research import a0_5, a0_5_inputs, swing_credit, swing_daily
 from trading_system.research import swing_earnings as earnings
-from trading_system.research import swing_forward as swing
 from trading_system.research import swing_short_sources as shorts
 from trading_system.research.daytrade_universe import JST, calendar_days, dated_inputs
 from trading_system.research.daytrade_universe import prepare as prepare_panel
@@ -508,16 +507,18 @@ def recover(project, *, now=None, on_a_inputs=None):
 
 
 def recover_supplemental(project, target, *, now=None):
-    """Independent legacy closes/review/public downloads follow perishable pre-open decisions."""
+    """Finish native paper accounts, the intraday panel and public inputs after A/B decisions."""
     project = Path(project).resolve()
     root = project / "data/plan-forward/recovery"
-    source = project / "data/swing-forward"
     tick = clock(now)
     try:
         with single_writer(root):
             report = read(root / "latest.json")
             if report["target"] != target:
                 raise ValueError("recovery_target_changed")
+            # A resumed receipt from before retirement can still contain old account steps.
+            report["steps"].pop("legacy_close", None)
+            report["steps"].pop("review", None)
             report["status"] = "running"
 
             def native_positions():
@@ -548,46 +549,6 @@ def recover_supplemental(project, target, *, now=None):
                         )
                 return result("ready")
 
-            def close():
-                if not (source / "initial.json").exists():
-                    if evening_threshold(target, tick()):
-                        swing.run(project, "init")
-                    else:
-                        return result("skipped", reason="not_initialized")
-                with single_writer(source):
-                    rows = swing.catch_up(project, source, target, tick())
-                    if not (source / "sessions" / target / "close.json").is_file():
-                        raise ValueError("legacy_close_unconfirmed")
-                return result("recovered" if rows else "ready", settled=rows)
-
-            def review():
-                path = source / "reviews" / (target + ".json")
-                due = evening_threshold(target, tick())
-                if (
-                    path.exists()
-                    and (not due or datetime.fromtimestamp(path.stat().st_mtime, UTC) >= due)
-                    and read(path)["through"] == target
-                ):
-                    return result(
-                        "ready",
-                        file=str(path.relative_to(source).as_posix()),
-                        matched_credit=read(path)["matched_credit"],
-                    )
-                if not (source / "sessions" / target / "close.json").exists():
-                    return result("skipped", reason="legacy_close_missing")
-                with single_writer(source):
-                    swing.save_review(source, target)
-                if not path.is_file():
-                    raise ValueError("legacy_review_unconfirmed")
-                saved = read(path)
-                if saved["through"] != target:
-                    raise ValueError("legacy_review_wrong_date")
-                return result(
-                    "recovered",
-                    file=str(path.relative_to(source).as_posix()),
-                    matched_credit=saved["matched_credit"],
-                )
-
             def panel():
                 panel_root = project / "data/rss-panel"
                 policy = project / "config/daytrade-universe.json"
@@ -604,8 +565,6 @@ def recover_supplemental(project, target, *, now=None):
             for key, operation in (
                 ("intraday_panel", panel),
                 ("native_positions", native_positions),
-                ("legacy_close", close),
-                ("review", review),
                 ("short_public", lambda: public(project, target, tick)),
             ):
                 _step(root, report, key, tick, operation)

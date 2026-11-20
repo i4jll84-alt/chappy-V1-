@@ -3,14 +3,11 @@ import sys
 from datetime import datetime
 from types import SimpleNamespace
 
-import pytest
-
 from trading_system import plan_forward, plan_startup
 from trading_system.brokers.locking import single_writer
-from trading_system.research import swing_forward
 
 
-def test_morning_recovers_before_both_forward_and_legacy_decisions(tmp_path, monkeypatch, capsys):
+def test_launcher_advances_plans_before_supplemental_jobs(tmp_path, monkeypatch, capsys):
     calls = []
     target = "2026-11-19"
 
@@ -28,20 +25,13 @@ def test_morning_recovers_before_both_forward_and_legacy_decisions(tmp_path, mon
         calls.append("supplemental")
         return {"status": "ok"}
 
-    def legacy(project, action, answer):
-        calls.append("legacy")
-        return {"state": "frozen"}
-
     monkeypatch.setattr(plan_startup.plan_recovery, "recover", recover)
     monkeypatch.setattr(plan_startup.plan_recovery, "recover_supplemental", supplemental)
     monkeypatch.setattr(plan_startup, "run_due", due)
-    monkeypatch.setattr(swing_forward, "run", legacy)
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(sys, "argv", ["swing_forward", "morning"])
-    assert swing_forward.main() == 0
+    assert plan_forward.main(["--project", str(tmp_path), "--catch-up"]) == 2
     report = json.loads(capsys.readouterr().out)
-    assert report["state"] == "frozen" and report["evening_recovery"]["status"] == "attention"
-    assert calls == ["fetch", "plans", "legacy", "supplemental"]
+    assert report["status"] == "attention" and set(report["plan_forward"]["plans"]) == {"A", "B"}
+    assert calls == ["fetch", "plans", "supplemental"]
 
 
 def test_one_startup_at_a_time_and_retry_after_process_exit(tmp_path, monkeypatch):
@@ -119,25 +109,13 @@ def test_registry_calls_preopen_adapter_only_for_eligible_pending_session(tmp_pa
     assert result["plans"]["B"]["morning_recovery"] == {"state": "ready"}
 
 
-def test_catch_up_cli_preserves_attention_and_legacy_failures(tmp_path, monkeypatch, capsys):
+def test_catch_up_cli_preserves_attention(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(plan_startup, "run_startup", lambda *a, **k: {"status": "attention"})
     assert plan_forward.main(["--project", str(tmp_path), "--catch-up"]) == 2
     assert json.loads(capsys.readouterr().out)["status"] == "attention"
-    calls = []
-    monkeypatch.setattr(plan_startup, "finish_startup", lambda *a, **k: calls.append("finished"))
-    monkeypatch.setattr(sys, "argv", ["swing_forward", "morning"])
-    monkeypatch.chdir(tmp_path)
-
-    def legacy(*a):
-        raise RuntimeError("legacy failure")
-
-    monkeypatch.setattr(swing_forward, "run", legacy)
-    with pytest.raises(RuntimeError, match="legacy failure"):
-        swing_forward.main()
-    assert calls == ["finished"]
 
 
-def test_2010_desktop_cli_and_codex_share_one_entrypoint(tmp_path, monkeypatch, capsys):
+def test_desktop_evening_check_dispatches_to_ab_recovery(tmp_path, monkeypatch, capsys):
     calls = []
 
     def shared(project):
@@ -147,15 +125,6 @@ def test_2010_desktop_cli_and_codex_share_one_entrypoint(tmp_path, monkeypatch, 
     monkeypatch.setitem(
         sys.modules, "trading_system.plan_evening", SimpleNamespace(run_evening=shared)
     )
-    monkeypatch.setattr(
-        swing_forward,
-        "datetime",
-        SimpleNamespace(now=lambda tz: datetime(2026, 11, 19, 20, 10, tzinfo=tz)),
-    )
-    monkeypatch.chdir(tmp_path)
     assert plan_forward.main(["--project", str(tmp_path), "--evening-check"]) == 0
-    first = json.loads(capsys.readouterr().out)
-    monkeypatch.setattr(sys, "argv", ["swing_forward", "evening"])
-    assert swing_forward.main() == 0
-    assert first == json.loads(capsys.readouterr().out)
-    assert calls == [tmp_path, tmp_path]
+    assert json.loads(capsys.readouterr().out) == {"status": "ok", "state": "evening"}
+    assert calls == [tmp_path]

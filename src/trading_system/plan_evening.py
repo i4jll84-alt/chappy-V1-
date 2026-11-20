@@ -1,4 +1,4 @@
-"""One local 20:10 paper recovery for the desktop and the scheduled evening heartbeat."""
+"""Reconcile the A/B paper plans and shared inputs for the 20:10 desktop run."""
 
 from datetime import time
 from pathlib import Path
@@ -14,8 +14,8 @@ def collect(project, now):
     return run_startup(project, now=now)
 
 
-def legacy_result(report, day):
-    """Convert actual per-source observations into the existing evening job's result fields."""
+def source_result(report, day):
+    """Summarize verified data sources for the evening receipt."""
     payload = report.get("supplemental", {})
     if payload.get("target") != day:
         payload = report.get("recovery", {})
@@ -62,11 +62,6 @@ def legacy_result(report, day):
         if step.get("status") == "ready"
         else "needs_review:" + step.get("reason", step.get("status", "missing_receipt"))
     )
-    step = field("legacy_close")
-    output["settled"] = step.get("settled", {"needs_review": step.get("reason", "missing_receipt")})
-    step = field("review")
-    if step.get("status") in ok and "file" in step and "matched_credit" in step:
-        output["review"] = {"file": step["file"], "matched_credit": step["matched_credit"]}
     return output
 
 
@@ -103,7 +98,7 @@ def run_evening(project, *, now=None):
                     if report.get("status") not in ("ok", "attention", "error", "busy"):
                         raise ValueError("invalid_evening_recovery_status")
                     receipt.update(report)
-                    receipt.update(legacy_result(report, day))
+                    receipt.update(source_result(report, day))
                     if report.get("status") == "ok":
                         # A fully collected source may report a real empty release. Keep that
                         # result visible and retryable, without creating a completed receipt.
@@ -112,8 +107,6 @@ def run_evening(project, *, now=None):
                         if (
                             len(evidence) != 2
                             or len(margins) != 2
-                            or "review" not in receipt
-                            or isinstance(receipt.get("settled"), dict)
                             or any(
                                 s not in ("acquired", "already_acquired")
                                 for s in [

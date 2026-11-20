@@ -26,13 +26,7 @@ def observations(target):
             "companies": 2,
             "files": 1,
         },
-        "legacy_close": {"status": "recovered", "settled": [[target, "settled"]]},
         "short_public": {"status": "ready"},
-        "review": {
-            "status": "recovered",
-            "file": "reviews/" + target + ".json",
-            "matched_credit": {"machine": {}},
-        },
     }
     result = {"status": "ok", "target": target, "steps": steps}
     return {
@@ -49,7 +43,7 @@ def set_clock(monkeypatch, flag):
     )
 
 
-def test_shared_due_receipt_with_exact_legacy_fields(tmp_path, monkeypatch):
+def test_due_receipt_with_shared_sources_and_no_retired_accounts(tmp_path, monkeypatch):
     set_clock(monkeypatch, "1")
     calls = []
     monkeypatch.setattr(evening, "collect", lambda p, n: calls.append((p, n)) or observations(DAY))
@@ -59,12 +53,22 @@ def test_shared_due_receipt_with_exact_legacy_fields(tmp_path, monkeypatch):
     assert r["status"] == "ok" and r["state"] == "evening"
     assert r["short_margin"] == {PREVIOUS: "already_acquired", DAY: "acquired"}
     assert r["credit"] == r["short_margin"] and r["short_public"] == "already_acquired"
-    assert r["settled"] == [[DAY, "settled"]] and r["earnings"]["companies"] == 2
-    assert r["review"]["matched_credit"] == {"machine": {}}
+    assert r["earnings"]["companies"] == 2
+    assert "settled" not in r and "review" not in r
     path = tmp_path / "data/plan-forward/recovery/evening" / (DAY + ".json")
     old = path.read_bytes()
     again = evening.run_evening(tmp_path, now=local("23:59"))
     assert again["already_handled"] and len(calls) == 1 and old == path.read_bytes()
+
+
+def test_completed_historical_receipt_is_preserved(tmp_path, monkeypatch):
+    path = tmp_path / "data/plan-forward/recovery/evening" / (DAY + ".json")
+    record = {"date": DAY, "status": "ok", "settled": [[DAY, "settled"]], "review": {"file": "old"}}
+    recovery.save(path, record)
+    before = path.read_bytes()
+    monkeypatch.setattr(evening, "collect", lambda *a: pytest.fail("already completed"))
+    assert evening.run_evening(tmp_path, now=local("20:12")) == dict(record, already_handled=True)
+    assert path.read_bytes() == before
 
 
 def test_busy_calendar_error_holiday_and_next_session(tmp_path, monkeypatch):
@@ -122,27 +126,23 @@ def test_timed_earnings_refresh_keeps_retry_and_early_data_distinct(tmp_path, mo
     assert second["status"] == "ready" and second["files"] == 1 and len(records) == 2
 
 
-def test_other_native_account_still_gets_same_day_evening_plan(tmp_path, monkeypatch):
+@pytest.mark.parametrize("existing_book", [False, True])
+def test_native_paper_continues_without_advancing_the_retired_books(
+    tmp_path, monkeypatch, existing_book
+):
     now = local("20:11")
     root = tmp_path / "data/plan-forward/recovery"
+    steps = {"native_evening": {"status": "ready", "capital": 3_000_000}}
+    source = tmp_path / "data/swing-forward"
+    if existing_book:
+        for filename in ("initial.json", f"sessions/{PREVIOUS}/close.json"):
+            recovery.save(source / filename, {"historical": True})
+        steps.update(legacy_close={"status": "error"}, review={"status": "running"})
+    before = {p: p.read_bytes() for p in source.rglob("*.json")}
     recovery.save(
         root / "latest.json",
-        dict(
-            status="ok",
-            target=DAY,
-            next_session="2026-11-20",
-            steps={"native_evening": {"status": "ready", "capital": 3_000_000}},
-        ),
+        dict(status="ok", target=DAY, next_session="2026-11-20", steps=steps),
     )
-    source = tmp_path / "data/swing-forward"
-    recovery.save(source / "initial.json", {})
-    recovery.save(source / "sessions" / DAY / "close.json", {})
-    monkeypatch.setattr(recovery.swing, "catch_up", lambda *a: [])
-
-    def review(source, day):
-        recovery.save(source / "reviews" / (day + ".json"), {"through": DAY, "matched_credit": {}})
-
-    monkeypatch.setattr(recovery.swing, "save_review", review)
     monkeypatch.setattr(recovery, "public", lambda *a: recovery.result("ready"))
     monkeypatch.setattr(recovery.a0_5, "enabled", lambda p: True)
     monkeypatch.setattr(recovery.a0_5.book, "load", lambda *a: {"plans": {}})
@@ -155,6 +155,9 @@ def test_other_native_account_still_gets_same_day_evening_plan(tmp_path, monkeyp
     r = recovery.recover_supplemental(tmp_path, DAY, now=now)
     assert r["status"] == "ok" and calls == [(DAY, 1_000_000)]
     assert r["steps"]["native_positions"]["accounts"][1_000_000]["status"] == "recovered"
+    assert "legacy_close" not in r["steps"] and "review" not in r["steps"]
+    assert {p: p.read_bytes() for p in source.rglob("*.json")} == before
+    assert source.exists() == existing_book
 
 
 def test_short_public_after_2010_requires_one_full_new_archive(tmp_path, monkeypatch):
@@ -206,7 +209,7 @@ def test_short_public_after_2010_requires_one_full_new_archive(tmp_path, monkeyp
 def test_incomplete_source_proof_never_creates_completion(tmp_path, monkeypatch):
     set_clock(monkeypatch, "1")
     r = observations(DAY)
-    del r["supplemental"]["steps"]["review"]
+    del r["supplemental"]["steps"]["earnings"]
     monkeypatch.setattr(evening, "collect", lambda *a: r)
     checked = evening.run_evening(tmp_path, now=local("20:10"))
     assert checked["status"] == "attention" and "completed_at" not in checked
