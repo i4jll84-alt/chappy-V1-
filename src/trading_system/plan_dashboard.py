@@ -59,52 +59,6 @@ STEP_STATES = {
     "busy": "他で処理中",
 }
 
-RULES = (
-    (
-        "Aプラン　基準③",
-        (
-            (
-                "選定",
-                "東証3市場の国内普通株で、当日の売買代金1億円以上、終値での費用込み100株が20万円以内。"
-                "20営業日騰落率がプラス、終値＞5日線＞20日線、売買代金が直前5日平均を上回る銘柄が対象です。",
-            ),
-            (
-                "日証金",
-                "制限措置がなく、融資残高と貸株残高の差が前日より増えていないことを確認します。"
-                "20営業日騰落率が高い順に最大5銘柄を選びます。",
-            ),
-            (
-                "売買",
-                "朝の売却前現金で各100株を購入します。同時保有数に上限はありません。"
-                "前日終値比＋3%超の寄付は見送り、買値から2ATR下で損切り、買付日の6営業日後の寄付で期限売却します。"
-                "費用は片道10円＋売買代金の0.05%です。",
-            ),
-        ),
-    ),
-    (
-        "Bプラン　A0-5",
-        (
-            (
-                "選定",
-                "東証プライム・スタンダードが対象。TOPIX終値が20日線を上回り、"
-                "個別株の終値が直前20営業日の高値を超え、出来高が直前20日平均の1.5倍以上。"
-                "業種の相対的な強さ・売買代金シェア、海外投資家の買い越し、売上と営業利益の伸び、"
-                "信用買い残日数5日以下を確認します。",
-            ),
-            (
-                "買付",
-                "20日平均売買代金5億円以上の候補を同代金の大きい順に検討し、翌寄付で買います。"
-                "1日2銘柄、同時5銘柄、同一業種2銘柄まで。1銘柄は資産の20%以内で、受渡余力と決算予定を確認します。",
-            ),
-            (
-                "手仕舞い",
-                "決算回避、終値の10日移動平均割れ、または15営業日の保有期限で翌寄付に売却します。"
-                "片道の手数料0.05%とスリッページ0.10%を見込みます。",
-            ),
-        ),
-    ),
-)
-
 
 def read_report(path):
     try:
@@ -449,7 +403,6 @@ class PlanDashboard:
         )
         self.recovery.bind("<<TreeviewSelect>>", lambda _e: self.show_step())
         self.add_holdings(notebook)
-        self.add_rules(notebook)
         self.timer = tab.after_idle(self.on_startup)
         tab.bind("<Destroy>", self.on_destroy, add=True)
 
@@ -550,28 +503,6 @@ class PlanDashboard:
                     row["note"],
                 ),
             )
-
-    @staticmethod
-    def add_rules(notebook):
-        from tkinter import ttk
-
-        tab = ttk.Frame(notebook, padding=(20, 12))
-        notebook.add(tab, text="トレード手法")
-        ttk.Label(tab, text="A・Bの売買ルール", style="Title.TLabel").pack(anchor="w", pady=(0, 8))
-        for title, rules in RULES:
-            card = ttk.LabelFrame(tab, text=title, padding=(12, 8))
-            card.pack(fill="x", pady=(0, 10))
-            card.columnconfigure(1, weight=1)
-            for idx, (label, description) in enumerate(rules):
-                ttk.Label(card, text=label).grid(
-                    row=idx, column=0, sticky="nw", padx=(0, 14), pady=4
-                )
-                text = ttk.Label(card, text=description, wraplength=720, justify="left")
-                text.grid(row=idx, column=1, sticky="ew", pady=4)
-                text.bind(
-                    "<Configure>",
-                    lambda e, widget=text: widget.configure(wraplength=max(100, e.width - 4)),
-                )
 
     def on_destroy(self, event):
         if event.widget == self.frame and self.timer:

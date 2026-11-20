@@ -446,7 +446,6 @@ def test_holdings_tab_updates_prices_without_changing_account_snapshot(tmp_path,
         assert [notebook.tab(tab, "text") for tab in notebook.tabs()] == [
             "A・Bの稼働状況",
             "保有銘柄",
-            "トレード手法",
         ]
         values = view.holdings.item(view.holdings.get_children()[0], "values")
         assert values == (
