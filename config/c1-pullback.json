@@ -1,4 +1,5 @@
 {
+  "enable_earnings_guard": true,
   "enable_vol_circuit_breaker": false,
   "vol_source": "NIKKEI_VI",
   "vol_threshold": 30.0

@@ -66,7 +66,11 @@ def test_prior_exchange_session_and_revision_by_cutoff():
 def test_earnings_unknown_and_explicit_none_frozen_at_cutoff(tmp_path, monkeypatch):
     available = "2026-11-20T16:00:00+09:00"
     evidence = dict(
-        state="verified", manifest="stub", manifest_sha256="abc", available_at=available
+        state="verified",
+        manifest="stub",
+        manifest_sha256="abc",
+        available_at=available,
+        sources=[{"rows": 3}],
     )
     monkeypatch.setattr(
         src.swing_earnings,
@@ -74,9 +78,9 @@ def test_earnings_unknown_and_explicit_none_frozen_at_cutoff(tmp_path, monkeypat
         lambda *_: (
             evidence,
             {
-                "10000": [["2026-11-24", "A"]],
-                "10010": [[None, "unknown"]],
-                "10020": [["2026-01-01", "old"]],
+                "10000": [["2026-11-24", 0]],
+                "10010": [[None, 0]],
+                "10020": [["2026-01-01", 0]],
             },
         ),
     )
@@ -105,11 +109,33 @@ def test_earnings_unknown_and_explicit_none_frozen_at_cutoff(tmp_path, monkeypat
         encoding="utf-8",
     )
     refs = []
-    assert src._earnings(tmp_path, "2026-11-20", cutoff(), refs) == {
-        "10000": ["2026-11-24"],
-        "10030": [],
-    }
+    universe = ["10000", "10010", "10020", "10030", "10040"]
+    dates, verified = src._earnings(tmp_path, "2026-11-20", cutoff(), refs, universe)
+    assert verified
+    assert dates == {"10000": ["2026-11-24"], "10020": [], "10030": [], "10040": []}
     assert len(refs) == 2
+    # Unknown dates stay unresolved even with a complete file. Missing and future
+    # snapshots cannot establish that all unlisted companies are clear to buy.
+    monkeypatch.setattr(src.swing_earnings, "asof", lambda *_: ({"state": "unavailable"}, {}))
+    assert src._earnings(tmp_path, "2026-11-20", cutoff(), [], universe) == ({"10030": []}, False)
+    evidence["sources"][0]["rows"] = 2
+    monkeypatch.setattr(src.swing_earnings, "asof", lambda *_: (evidence, {}))
+    with pytest.raises(ValueError, match="incomplete_earnings_list"):
+        src._earnings(tmp_path, "2026-11-20", cutoff(), [], universe)
+    evidence["sources"][0]["rows"] = 0
+    assert src._earnings(tmp_path, "2026-11-20", cutoff(), [], universe) == (
+        {code: [] for code in universe},
+        True,
+    )
+
+
+def test_fixed_mode_never_reads_the_earnings_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(src, "_earnings", lambda *_: pytest.fail("read earnings while disabled"))
+    result = src.load_day(tmp_path, "2026-11-20", cutoff(), enable_earnings_guard=False)
+    assert result["earnings_verified"] is None and result["enable_earnings_guard"] is False
+    assert not any(reason.startswith("earnings_") for reason in result["reasons"])
+    with pytest.raises(ValueError, match="invalid_enable_earnings_guard"):
+        src.load_day(tmp_path, "2026-11-20", cutoff(), enable_earnings_guard="false")
 
 
 def test_future_and_incomplete_bars_never_create_official_open(tmp_path, monkeypatch):

@@ -3,7 +3,7 @@
 import json
 import math
 import sqlite3
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
 import duckdb
@@ -87,24 +87,43 @@ def _receipt(root, day, cutoff):
     return receipt
 
 
-def _earnings(project, day, cutoff, refs):
+def _earnings(project, day, cutoff, refs, universe):
     root = project / "data/swing-forward"
     meta, events = swing_earnings.asof(root, cutoff)
     if meta.get("reason") == "no_snapshot_by_cutoff" and day < cutoff.date().isoformat():
         prev = datetime.combine(pd.Timestamp(day).date(), time.max, JST)
         meta, events = swing_earnings.asof(root, prev)
     earnings = {}
-    if meta.get("state") == "verified":
+    verified = meta.get("state") == "verified"
+    if verified:
+        if not isinstance(events, dict) or not meta["sources"]:
+            raise ValueError("incomplete_earnings_list")
+        # capture() downloads and parses every linked workbook before publishing
+        # its manifest. asof() hashes all of them; reconcile the parsed row counts too.
+        counts = [0 for _ in meta["sources"]]
+        earnings = {code: [] for code in universe}
         refs.append({k: meta[k] for k in ("manifest", "manifest_sha256", "available_at")})
         for code, rows in events.items():
-            dates = {row[0] for row in rows}
-            if None in dates:
-                continue
-            future = sorted(d for d in dates if d >= day)
-            if future:
-                earnings[code] = future
-    # Absence from the JPX announcement list is not proof of no earnings.
-    # An explicit, dated negative declaration can be supplied with its source.
+            if not isinstance(rows, list) or not rows:
+                raise ValueError("incomplete_earnings_row")
+            dates = set()
+            for announced, source in rows:
+                if type(source) is not int or not 0 <= source < len(counts):
+                    raise ValueError("invalid_earnings_workbook")
+                if announced is not None and date.fromisoformat(announced).isoformat() != announced:
+                    raise ValueError("invalid_earnings_date")
+                counts[source] += 1
+                dates.add(announced)
+            future = sorted(d for d in dates if d is not None and d >= day)
+            if None in dates and not future:
+                earnings.pop(code, None)
+            else:
+                # A confirmed imminent exit still applies if another workbook
+                # lists an undated announcement for the same company.
+                earnings[code] = ([None] if None in dates else []) + future
+        if counts != [source["rows"] for source in meta["sources"]]:
+            raise ValueError("incomplete_earnings_list")
+    # Explicit evidence can resolve an unknown listed date as of the cutoff.
     path = project / "data/c1-inputs/earnings.json"
     if path.is_file():
         docs = json.loads(path.read_bytes())
@@ -131,7 +150,7 @@ def _earnings(project, day, cutoff, refs):
             earnings[code] = sorted(set(dates))
         if applicable:
             refs.append(dict(dataset="c1_earnings", sha256=saved.sha(path)))
-    return earnings
+    return earnings, verified
 
 
 def _latest(rows, source, day, cutoff):
@@ -238,6 +257,7 @@ def load_day(
     cutoff,
     *,
     rsi_threshold=c1_signals.DEFAULT_RSI_THRESHOLD,
+    enable_earnings_guard: bool = True,
     enable_vol_circuit_breaker=False,
     vol_threshold=30,
     vol_source="NIKKEI_VI",
@@ -245,6 +265,8 @@ def load_day(
 ):
     """Load immutable-by-cutoff sources and return an entry gate, exit marks and evidence."""
     project, day, cutoff = Path(project), iso(signal_date), _stamp(cutoff).astimezone(JST)
+    if type(enable_earnings_guard) is not bool:
+        raise ValueError("invalid_enable_earnings_guard")
     root = project / "data/jquants"
     if cutoff < datetime.combine(pd.Timestamp(day).date(), time(15, 30), JST):
         raise ValueError("signal_close_in_future")
@@ -309,11 +331,15 @@ def load_day(
         except SOURCE_ERRORS as exc:
             missing.append(f"margin_unverified:{pub}:{type(exc).__name__}")
     frames = {name: _combined(name, items) for name, items in raw.items()}
-    try:
-        earnings = _earnings(project, day, cutoff, refs)
-    except SOURCE_ERRORS as exc:
-        earnings = {}
-        missing.append(f"earnings_unverified:{type(exc).__name__}")
+    earnings, earnings_verified = {}, None
+    earnings_issue = None
+    if enable_earnings_guard:
+        universe = frames["master"].loc[frames["master"].Date.eq(day), "Code"]
+        try:
+            earnings, earnings_verified = _earnings(project, day, cutoff, refs, universe)
+        except SOURCE_ERRORS as exc:
+            earnings_verified = False
+            earnings_issue = f"earnings_unverified:{type(exc).__name__}"
     vol_value = None
     if enable_vol_circuit_breaker:
         try:
@@ -335,4 +361,15 @@ def load_day(
     if missing:
         result.update(coverage_ok=False, allow_entries=False, ranked=[])
         result["reasons"].extend(missing)
-    return dict(result, sessions=all_days, refs=refs)
+    if earnings_verified is False:
+        # A missing calendar blocks new entries, independently of technical readiness.
+        # Existing holdings can still act on verified dates, stops, SMA or time exits.
+        result["allow_entries"] = False
+        result["reasons"].append(earnings_issue or "earnings_snapshot_unavailable")
+    return dict(
+        result,
+        sessions=all_days,
+        refs=refs,
+        enable_earnings_guard=enable_earnings_guard,
+        earnings_verified=earnings_verified,
+    )

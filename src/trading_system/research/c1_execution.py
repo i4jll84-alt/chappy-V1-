@@ -92,9 +92,13 @@ def _earnings_between(earnings, code, start, end, *, include_start=True):
         return None
     if isinstance(dates, str):
         raise ValueError("C1 earnings must be a list of ISO dates or None")
-    if include_start:
-        return any(start <= value <= end for value in dates)
-    return any(start < value <= end for value in dates)
+    known = (value for value in dates if value is not None)
+    scheduled = (
+        any(start <= value <= end for value in known)
+        if include_start
+        else any(start < value <= end for value in known)
+    )
+    return scheduled if scheduled or None not in dates else None
 
 
 def freeze_plan(
@@ -108,8 +112,11 @@ def freeze_plan(
     *,
     allow_entries=True,
     stop_atr=2.0,
+    enable_earnings_guard: bool = True,
 ):
     """Create next-open instructions from facts available at the signal cutoff."""
+    if type(enable_earnings_guard) is not bool:
+        raise ValueError("invalid_enable_earnings_guard")
     idx = _session(sessions, signal_date)
     if idx + 1 >= len(sessions) or sessions[idx + 1] != order_date:
         raise ValueError("C1 order date must be the next trading session")
@@ -123,6 +130,7 @@ def freeze_plan(
         signal_date=signal_date,
         order_date=order_date,
         stop_atr=float(multiple),
+        enable_earnings_guard=enable_earnings_guard,
         buys=[],
         sells=[],
         skips=[],
@@ -132,9 +140,10 @@ def freeze_plan(
         row = marks.get(code, {})
         close = _positive(row.get("close"))
         sma = _positive(row.get("sma5"))
-        if _earnings_between(earnings, code, signal_date, order_date, include_start=False):
-            reason = "earnings"
-        elif pos.get("pending_exit") == "earnings":
+        if enable_earnings_guard and (
+            pos.get("pending_exit") == "earnings"
+            or _earnings_between(earnings, code, signal_date, order_date, include_start=False)
+        ):
             reason = "earnings"
         elif pos.get("pending_exit") == "above_sma5" or (
             close is not None and sma is not None and close > sma
@@ -165,7 +174,7 @@ def freeze_plan(
         raise ValueError("C1 candidate deviation must be finite")
     if len({r["code"] for r in rows}) != len(rows):
         raise ValueError("C1 candidate codes must be unique")
-    if idx + 3 >= len(sessions):
+    if enable_earnings_guard and idx + 3 >= len(sessions):
         raise ValueError("C1 needs three entry-window trading sessions")
     nav = _decimal(account["equity"][-1]["nav"] if account["equity"] else account["capital"])
     free_cash = _decimal(available_cash(account, order_date))
@@ -175,7 +184,11 @@ def freeze_plan(
     for rank, r in enumerate(chosen, 1):
         code = r["code"]
         close, atr = _positive(r.get("close")), _positive(r.get("atr14"))
-        event = _earnings_between(earnings, code, order_date, sessions[idx + 3])
+        event = (
+            _earnings_between(earnings, code, order_date, sessions[idx + 3])
+            if enable_earnings_guard
+            else False
+        )
         reason = None
         shares = 0
         if event is None:

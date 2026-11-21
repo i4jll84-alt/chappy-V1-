@@ -168,6 +168,33 @@ def test_frozen_earnings_exit_includes_a_non_session_between_signal_and_order():
     assert plan(a, 1, earnings={"A": [CAL[1]]})["sells"] == []
 
 
+def test_replay_switch_bypasses_both_earnings_checks_and_preserves_other_exits():
+    signals = [candidate("A"), candidate("B")]
+    first = plan(
+        book.initial_account(), 0, signals, earnings={"A": [CAL[1]]}, enable_earnings_guard=False
+    )
+    assert first["enable_earnings_guard"] is False
+    assert [b["code"] for b in first["buys"]] == ["A", "B"]
+    a = buy_once("A")
+    a["positions"]["A"]["pending_exit"] = "earnings"
+    opts = dict(earnings={"A": [CAL[2]]}, enable_earnings_guard=False)
+    assert plan(a, 1, **opts)["sells"] == []
+    assert (
+        plan(a, 1, marks={"A": {"close": 990, "sma5": 985}}, **opts)["sells"][0]["reason"]
+        == "above_sma5"
+    )
+    with pytest.raises(ValueError, match="invalid_enable_earnings_guard"):
+        plan(a, 1, enable_earnings_guard=0)
+
+
+def test_unknown_extra_announcement_protects_entries_and_preserves_a_known_exit():
+    a = buy_once("A")
+    declared = {"A": [None, CAL[2]], "B": [None, CAL[8]]}
+    next_plan = plan(a, 1, [candidate("B")], earnings=declared)
+    assert [r["reason"] for r in next_plan["sells"]] == ["earnings"]
+    assert [r["reason"] for r in next_plan["skips"]] == ["unknown_earnings"]
+
+
 def test_confirm_actual_sale_before_reusing_sector_slots_and_no_same_day_reentry():
     a = buy_once("A", "B")
     p = plan(a, 1, [candidate(c) for c in "ACD"], marks={"A": {"close": 990, "sma5": 985}})

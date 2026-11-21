@@ -22,6 +22,7 @@ INPUT_ERRORS = (FileNotFoundError, ValueError, sqlite3.Error, duckdb.Error)
 def read_settings(project):
     path = project / "config/c1-pullback.json"
     settings = {
+        "enable_earnings_guard": True,
         "enable_vol_circuit_breaker": False,
         "vol_threshold": 30.0,
         "vol_source": "NIKKEI_VI",
@@ -32,7 +33,8 @@ def read_settings(project):
             raise ValueError("unknown_c1_setting")
         settings.update(overrides)
     if (
-        type(settings["enable_vol_circuit_breaker"]) is not bool
+        settings["enable_earnings_guard"] is not True
+        or type(settings["enable_vol_circuit_breaker"]) is not bool
         or settings["vol_source"] not in {"NIKKEI_VI", "VIX"}
         or type(settings["vol_threshold"]) not in {int, float}
         or not math.isfinite(settings["vol_threshold"])
@@ -100,8 +102,9 @@ def freeze(project, book, account, signal, target, sessions, sources, clock, set
                 raise
             data["reasons"].append(type(exc).__name__)
     paused = stopped(project, book)
-    enabled = data["allow_entries"] and not paused
-    state = "ready" if data["coverage_ok"] else "insufficient_data"
+    inputs_ready = data["coverage_ok"] and data.get("earnings_verified") is True
+    enabled = inputs_ready and data["allow_entries"] and not paused
+    state = "ready" if inputs_ready else "insufficient_data"
     if paused:
         state = "stopped"
     plan = c1_execution.freeze_plan(
@@ -113,6 +116,7 @@ def freeze(project, book, account, signal, target, sessions, sources, clock, set
         data["earnings"],
         sessions,
         allow_entries=enabled,
+        enable_earnings_guard=True,
     )
     recorded = clock()
     if recorded >= deadline:
@@ -127,6 +131,7 @@ def freeze(project, book, account, signal, target, sessions, sources, clock, set
             data["earnings"],
             sessions,
             allow_entries=False,
+            enable_earnings_guard=True,
         )
     return {
         "version": VERSION,
@@ -142,6 +147,7 @@ def freeze(project, book, account, signal, target, sessions, sources, clock, set
         "counts": data["counts"],
         "reasons": data["reasons"],
         "coverage_ok": data["coverage_ok"],
+        "earnings_verified": data.get("earnings_verified"),
         "allow_entries": enabled and state != "missed_preopen",
         "ranked": data["ranked"] if state != "missed_preopen" else [],
         "inputs": data["refs"],

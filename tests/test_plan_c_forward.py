@@ -27,6 +27,7 @@ def setup(tmp_path, monkeypatch):
             earnings={CODE: []},
             allow_entries=True,
             coverage_ok=True,
+            earnings_verified=True,
             reasons=[],
             counts={"data_ready": 2500},
             refs=[],
@@ -115,6 +116,29 @@ def test_settings_reject_invalid_switch(tmp_path):
     path.write_text('{"enable_vol_circuit_breaker":"false"}')
     with pytest.raises(ValueError, match="invalid_c1_settings"):
         adapter.read_settings(tmp_path)
+    path.write_text('{"enable_earnings_guard":false}')
+    with pytest.raises(ValueError, match="invalid_c1_settings"):
+        adapter.read_settings(tmp_path)
+
+
+def test_good_price_coverage_can_retry_a_missing_earnings_snapshot(setup, monkeypatch):
+    book, run = setup
+    original = adapter.c1_inputs.load_day
+    monkeypatch.setattr(
+        adapter.c1_inputs,
+        "load_day",
+        lambda *a, **k: dict(
+            original(*a, **k), earnings_verified=False, reasons=["earnings_snapshot_unavailable"]
+        ),
+    )
+    assert run("2026-11-24T20:00")["status"] == "waiting_inputs"
+    folder = book / "sessions" / DAYS[1]
+    provisional = adapter.files.read(next((folder / "attempts").glob("*.json")))
+    assert provisional["coverage_ok"] and not provisional["plan"]["buys"]
+    monkeypatch.setattr(adapter.c1_inputs, "load_day", original)
+    assert run("2026-11-25T08:50")["orders"] == 1
+    final = adapter.files.read(folder / "decision.json")
+    assert final["earnings_verified"] and final["plan"]["enable_earnings_guard"] is True
 
 
 def test_disk_staging_crossing_nine_discards_purchase(setup):

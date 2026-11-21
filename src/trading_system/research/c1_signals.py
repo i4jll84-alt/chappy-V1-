@@ -79,6 +79,72 @@ def _balances(margin, date, bars, sessions):
     )
 
 
+def score_window(
+    closes,
+    high,
+    low,
+    value,
+    volume,
+    comparable,
+    in_universe,
+    available,
+    *,
+    rsi_threshold=DEFAULT_RSI_THRESHOLD,
+):
+    """Score a 75-session by stock matrix; missing numerical inputs are NaN.
+
+    `available` is each stock's point-in-time, validated margin balance.
+    The identical masks apply to fixed-vintage replay and the prospective account.
+    """
+    last = closes[-1]
+    sma25, sma75 = closes[-25:].mean(axis=0), closes.mean(axis=0)
+    rsi = wilder_rsi2(closes)
+    tr = np.maximum(high[-14:], closes[-15:-1]) - np.minimum(low[-14:], closes[-15:-1])
+    atr = tr.mean(axis=0)
+    valid_atr = (
+        np.isfinite(atr)
+        & (atr > 0)
+        & (high[-14:] >= closes[-14:]).all(axis=0)
+        & (low[-14:] <= closes[-14:]).all(axis=0)
+        & (low[-14:] > 0).all(axis=0)
+    )
+    # The credit-balance denominator excludes the signal day's volume.
+    average_volume = volume[-21:-1].mean(axis=0)
+    average_value = value[-20:].mean(axis=0)
+    signal_inputs = (
+        in_universe
+        & np.isfinite(sma75)
+        & comparable.all(axis=0)
+        & np.isfinite(rsi)
+        & np.isfinite(average_volume)
+        & (volume[-21:-1] >= 0).all(axis=0)
+        & (average_volume > 0)
+        & np.isfinite(average_value)
+        & (value[-20:] >= 0).all(axis=0)
+        & np.isfinite(available)
+    )
+    # Coverage measures price and credit. Sector and earnings are later order checks.
+    complete = signal_inputs & valid_atr
+    liquid = signal_inputs & (average_value >= MIN_AVG_VALUE)
+    choose = (
+        liquid
+        & (last > sma75)
+        & (sma25 > sma75)
+        & (last < closes[-5:].mean(axis=0))
+        & (rsi <= rsi_threshold + 1e-12)
+        & (available <= 5 * average_volume)
+    )
+    return dict(
+        complete=complete,
+        liquid=liquid,
+        choose=choose,
+        atr=atr,
+        valid_atr=valid_atr,
+        sma25=sma25,
+        rsi=rsi,
+    )
+
+
 def evaluate(
     sessions,
     bars,
@@ -173,56 +239,32 @@ def evaluate(
         )
     if len(days) == REQUIRED_SESSIONS and len(codes):
         high, low, value, volume = (matrix(k) for k in ("H", "L", "Va", "Vo"))
-        sma25, sma75 = closes[-25:].mean(axis=0), closes.mean(axis=0)
-        rsi = wilder_rsi2(closes)
-        tr = np.maximum(high[-14:], closes[-15:-1]) - np.minimum(low[-14:], closes[-15:-1])
-        atr = tr.mean(axis=0)
-        # The credit-balance denominator uses the 20 completed sessions before the signal day.
-        average_volume = volume[-21:-1].mean(axis=0)
-        average_value = value[-20:].mean(axis=0)
         available = balances.reindex(codes).to_numpy(dtype=float)
         sector = today.S33.reindex(codes)
         known_sector = sector.notna().to_numpy() & ~sector.fillna("").isin(["", "9999"]).to_numpy()
-        known_earnings = np.array([isinstance(earnings.get(c), (list, tuple)) for c in codes])
-        valid_atr = (
-            np.isfinite(atr)
-            & (atr > 0)
-            & (high[-14:] >= closes[-14:]).all(axis=0)
-            & (low[-14:] <= closes[-14:]).all(axis=0)
-            & (low[-14:] > 0).all(axis=0)
+        scored = score_window(
+            closes,
+            high,
+            low,
+            value,
+            volume,
+            comparable,
+            codes.isin(today.index),
+            available,
+            rsi_threshold=rsi_threshold,
         )
-        signal_inputs = (
-            codes.isin(today.index)
-            & np.isfinite(sma75)
-            & comparable.all(axis=0)
-            & np.isfinite(rsi)
-            & np.isfinite(average_volume)
-            & (volume[-21:-1] >= 0).all(axis=0)
-            & (average_volume > 0)
-            & np.isfinite(average_value)
-            & (value[-20:] >= 0).all(axis=0)
-            & np.isfinite(available)
+        counts.update(
+            data_ready=int(scored["complete"].sum()), eligible=int(scored["liquid"].sum())
         )
-        complete = signal_inputs & known_earnings & valid_atr & known_sector
-        liquid = signal_inputs & (average_value >= MIN_AVG_VALUE)
-        counts.update(data_ready=int(complete.sum()), eligible=int(liquid.sum()))
-        choose = (
-            liquid
-            & (last > sma75)
-            & (sma25 > sma75)
-            & (last < sma5)
-            & (rsi <= rsi_threshold + 1e-12)
-            & (available <= 5 * average_volume)
-        )
-        for idx in np.flatnonzero(choose):
+        for idx in np.flatnonzero(scored["choose"]):
             ranked.append(
                 dict(
                     code=str(codes[idx]),
                     sector=str(sector.iloc[idx]) if known_sector[idx] else None,
                     close=float(last[idx]),
-                    atr14=float(atr[idx]) if valid_atr[idx] else None,
-                    deviation=float(last[idx] / sma25[idx] - 1),
-                    rsi2=float(rsi[idx]),
+                    atr14=float(scored["atr"][idx]) if scored["valid_atr"][idx] else None,
+                    deviation=float(last[idx] / scored["sma25"][idx] - 1),
+                    rsi2=float(scored["rsi"][idx]),
                 )
             )
     if counts["data_ready"] < MIN_COMPLETE:

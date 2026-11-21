@@ -41,7 +41,8 @@ def test_real_readiness_floor_2500_before_liquidity_and_margin_fraction():
     args = sample(2500)
     _, prices, master, _, margin, _ = args
     prices.loc[prices.Code.ne("10000"), "Va"] = 1
-    result = sig.evaluate(*args)
+    # Technical coverage is identical even with no supplied earnings confirmations.
+    result = sig.evaluate(*args[:5], earnings={})
     assert result["coverage_ok"] and result["allow_entries"]
     assert result["counts"]["data_ready"] == 2500 and result["counts"]["eligible"] == 1
     assert [r["code"] for r in result["ranked"]] == ["10000"]
@@ -63,7 +64,7 @@ def test_rank_reservation_with_missing_earnings_and_atr_never_promotes_third(mon
     del earnings["10000"]
     bars.loc[bars.Code.eq("10010") & bars.Date.eq(days[-1]), "H"] = np.nan
     result = sig.evaluate(*args)
-    assert result["allow_entries"] and result["counts"]["data_ready"] == 1
+    assert result["allow_entries"] and result["counts"]["data_ready"] == 2
     assert [r["code"] for r in result["ranked"]] == ["10000", "10010", "10020"]
     assert result["ranked"][1]["atr14"] is None
     cal = list(pd.bdate_range(days[0], periods=81).strftime("%Y-%m-%d"))
@@ -107,7 +108,7 @@ def test_missing_sector_remains_reserved(monkeypatch):
     monkeypatch.setattr(sig, "MIN_COMPLETE", 1)
     result = sig.evaluate(*args)
     assert result["indicators"] == dict(rsi_method="Wilder", rsi_period=2, rsi_threshold=15)
-    assert result["ranked"][0]["sector"] is None and result["counts"]["data_ready"] == 2
+    assert result["ranked"][0]["sector"] is None and result["counts"]["data_ready"] == 3
     cal = list(pd.bdate_range(args[0][0], periods=81).strftime("%Y-%m-%d"))
     frozen = book.freeze_plan(
         book.initial_account(),
