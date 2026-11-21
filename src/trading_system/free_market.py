@@ -404,7 +404,12 @@ def schedule_decision(root, moment=None):
         return {**result, "state": "stopped"}
     for path in root.glob("report-*.json"):
         report = json.loads(path.read_text(encoding="utf-8"))
-        if report.get("state") != "checked" or report.get("issues"):
+        if (
+            report.get("state") != "checked"
+            or report.get("issues")
+            or report.get("jsf_comparison", {}).get("schema") != "jsf-original-approx-v1"
+            or report["jsf_comparison"].get("state") != "checked"
+        ):
             continue
         started = datetime.strptime(report["run"].split("-")[0], "%Y%m%dT%H%M%S").replace(
             tzinfo=UTC
@@ -446,6 +451,32 @@ def run_public(args):
         try:
             with httpx.Client(trust_env=False, follow_redirects=False, timeout=45) as client:
                 report = archive.collect(client)
+                from trading_system.research import jsf_daily_compare
+
+                try:
+                    if any(issue.get("http_status") in (429, 503) for issue in report["issues"]):
+                        comparison = {
+                            "schema": jsf_daily_compare.SCHEMA,
+                            "state": "waiting",
+                            "reason": "upstream_throttled",
+                        }
+                    else:
+                        comparison = jsf_daily_compare.collect(args.root, client, run=report["run"])
+                except (ValueError, KeyError, OSError, httpx.HTTPError) as exc:
+                    comparison = {
+                        "schema": jsf_daily_compare.SCHEMA,
+                        "state": "issues_found",
+                        "reason": type(exc).__name__,
+                    }
+                report["jsf_comparison"] = comparison
+                report["checked_at"] = datetime.now(UTC).isoformat()
+                if comparison["state"] != "checked":
+                    report["state"] = "issues_found"
+                    report["issues"].append({"problem": "jsf_comparison_incomplete"})
+                atomic_write(
+                    args.root / ("report-" + report["run"] + ".json"), canonical(report).encode()
+                )
+                atomic_write(args.root / "status.json", canonical(report).encode())
             print(json.dumps(report, ensure_ascii=False))
             return 0 if report["state"] == "checked" else 1
         finally:

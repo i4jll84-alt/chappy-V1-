@@ -175,7 +175,15 @@ def test_schedule_requires_successful_run_after_release(tmp_path):
 
     def save(run, state, completed):
         path.write_text(
-            json.dumps({"run": run, "state": state, "checked_at": completed, "issues": []}),
+            json.dumps(
+                {
+                    "run": run,
+                    "state": state,
+                    "checked_at": completed,
+                    "issues": [],
+                    "jsf_comparison": {"schema": "jsf-original-approx-v1", "state": "checked"},
+                }
+            ),
             encoding="utf-8",
         )
 

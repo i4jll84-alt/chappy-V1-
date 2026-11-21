@@ -10,6 +10,7 @@ from pathlib import Path
 from trading_system.brokers.locking import single_writer
 
 from . import irbank_jsf as jsf
+from .irbank_first5 import safe_check
 
 
 def inspect(root, stamp=None):
@@ -76,11 +77,11 @@ def run(project):
     root = project / "data/irbank_jsf"
     first = inspect(root)
     if first["state"] != "due":
-        return first
+        return {**first, "comparison": safe_check(project)}
     with single_writer(root / "daily-dispatch"):
         first = inspect(root)
         if first["state"] != "due":
-            return first
+            return {**first, "comparison": safe_check(project)}
         day = first["date"]
         folder = root / "daily" / day
         folder.mkdir(parents=True, exist_ok=True)
@@ -128,6 +129,7 @@ def run(project):
             break
         else:
             report.update(state="needs_attention", reason="daily_batch_limit")
+        report["comparison"] = safe_check(project)
         report["after"] = inspect(root)
         report["finished_at"] = jsf.now().isoformat()
         report["data_attempts_this_execution"] = (

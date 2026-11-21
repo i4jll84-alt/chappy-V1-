@@ -59,6 +59,7 @@ def test_success_after_release_skips_network(tmp_path):
                 "checked_at": "2026-10-30T10:15:00+00:00",
                 "state": "checked",
                 "issues": [],
+                "jsf_comparison": {"schema": "jsf-original-approx-v1", "state": "checked"},
             }
         ),
         encoding="utf-8",
