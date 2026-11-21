@@ -189,8 +189,20 @@ class Client:
         self.ends = datetime.fromisoformat(self.policy["ends_before"])
         if self.starts.utcoffset() is None or self.ends.utcoffset() is None:
             raise Halt("invalid_trial_policy")
-        if not 0 < self.policy["max_total_requests"] <= 9500:
+        accounting = self.policy.get("quota_accounting", "all_http")
+        if accounting not in ("all_http", "data_only"):
+            raise Halt("invalid_quota_accounting")
+        self.data_only = accounting == "data_only"
+        total_ceiling = 10000 if self.data_only else 9500
+        if not 0 < self.policy["max_total_requests"] <= total_ceiling:
             raise Halt("invalid_trial_total_limit")
+        self.initial_data = self.policy.get("initial_data_requests")
+        if self.data_only and (
+            type(self.initial_data) is not int
+            or not 0 <= self.initial_data <= self.policy["initial_requests"]
+        ):
+            raise Halt("initial_data_count_required")
+        self.run_day = self.tick().astimezone(JST).date()
         self.quota = None
         self.since_usage = 0
         self.usage_day = None
@@ -217,6 +229,24 @@ class Client:
         if not isinstance(extensions, dict):
             raise Halt("invalid_daily_extension")
         extension = extensions.get(day)
+        schedule = self.policy.get("daily_schedule")
+        if extension is None and schedule is not None:
+            if not isinstance(schedule, dict):
+                raise Halt("invalid_daily_schedule")
+            try:
+                start = date.fromisoformat(schedule["from"])
+                through = date.fromisoformat(schedule["through"])
+                cap = schedule["max_data_requests"]
+            except (KeyError, ValueError, TypeError) as exc:
+                raise Halt("invalid_daily_schedule") from exc
+            if (
+                type(cap) is not int
+                or not 1 <= cap <= 1000
+                or not self.starts.date() <= start <= through <= self.ends.date()
+            ):
+                raise Halt("invalid_daily_schedule")
+            if start <= date.fromisoformat(day) <= through:
+                extension = {"baseline_data_attempts": 0, "max_additional_data_attempts": cap}
         if extension is None:
             return None
         if not isinstance(extension, dict):
@@ -241,6 +271,8 @@ class Client:
         if not self.starts <= stamp < self.ends:
             raise Halt("outside_free_trial_window")
         day = stamp.astimezone(JST).date().isoformat()
+        if self.data_only and day != self.run_day.isoformat():
+            raise Halt("day_changed_resume")
         if kind == "data" and self.usage_day != stamp.astimezone(JST).date():
             raise Halt("day_changed_resume")
         count = self.db.execute("SELECT count(*) FROM requests WHERE day=?", (day,)).fetchone()[0]
@@ -255,14 +287,28 @@ class Client:
             data_count = self.db.execute(
                 "SELECT count(*) FROM requests WHERE day=? AND kind='data'", (day,)
             ).fetchone()[0]
-            baseline = self.policy["daily_extensions"][day]["baseline_data_attempts"]
+            baseline = (
+                self.policy.get("daily_extensions", {})
+                .get(day, {})
+                .get("baseline_data_attempts", 0)
+            )
             if data_count < baseline:
                 raise Halt("daily_extension_ledger_mismatch")
-            if data_count + initial_today >= cap:
+            initial_data_today = (
+                (self.initial_data if self.data_only else self.policy["initial_requests"])
+                if day == self.starts.date().isoformat()
+                else 0
+            )
+            if data_count + initial_data_today >= cap:
                 raise Halt("authorized_daily_data_limit")
-        total = self.db.execute("SELECT count(*) FROM requests").fetchone()[0]
-        if total + self.policy["initial_requests"] >= self.policy["max_total_requests"]:
-            raise Halt("trial_total_request_limit")
+        if self.data_only:
+            total = self.db.execute("SELECT count(*) FROM requests WHERE kind='data'").fetchone()[0]
+            if kind == "data" and total + self.initial_data >= self.policy["max_total_requests"]:
+                raise Halt("trial_total_request_limit")
+        else:
+            total = self.db.execute("SELECT count(*) FROM requests").fetchone()[0]
+            if total + self.policy["initial_requests"] >= self.policy["max_total_requests"]:
+                raise Halt("trial_total_request_limit")
         cur = self.db.execute(
             "INSERT INTO requests(day,started,kind,code,end_date) VALUES(?,?,?,?,?)",
             (day, stamp.isoformat(), kind, code, end),
