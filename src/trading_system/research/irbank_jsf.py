@@ -211,6 +211,27 @@ class Client:
         self.http.close()
         self.db.close()
 
+    def authorized_daily_cap(self, day):
+        """An explicitly authorized, dated extension never raises the provider's limit."""
+        extensions = self.policy.get("daily_extensions", {})
+        if not isinstance(extensions, dict):
+            raise Halt("invalid_daily_extension")
+        extension = extensions.get(day)
+        if extension is None:
+            return None
+        if not isinstance(extension, dict):
+            raise Halt("invalid_daily_extension")
+        baseline = extension.get("baseline_data_attempts")
+        extra = extension.get("max_additional_data_attempts")
+        if (
+            type(baseline) is not int
+            or type(extra) is not int
+            or not 0 <= baseline < 1000
+            or not 0 < extra <= 1000 - baseline
+        ):
+            raise Halt("invalid_daily_extension")
+        return baseline + extra
+
     def send(self, kind, code=None, end=None):
         if self.sent >= self.limit:
             raise Halt("run_request_limit")
@@ -226,8 +247,19 @@ class Client:
         initial_today = (
             self.policy["initial_requests"] if day == self.starts.date().isoformat() else 0
         )
-        if count + initial_today >= 950:
-            raise Halt("local_daily_request_limit")
+        cap = self.authorized_daily_cap(day)
+        if cap is None:
+            if count + initial_today >= 950:
+                raise Halt("local_daily_request_limit")
+        elif kind == "data":
+            data_count = self.db.execute(
+                "SELECT count(*) FROM requests WHERE day=? AND kind='data'", (day,)
+            ).fetchone()[0]
+            baseline = self.policy["daily_extensions"][day]["baseline_data_attempts"]
+            if data_count < baseline:
+                raise Halt("daily_extension_ledger_mismatch")
+            if data_count + initial_today >= cap:
+                raise Halt("authorized_daily_data_limit")
         total = self.db.execute("SELECT count(*) FROM requests").fetchone()[0]
         if total + self.policy["initial_requests"] >= self.policy["max_total_requests"]:
             raise Halt("trial_total_request_limit")
@@ -262,6 +294,8 @@ class Client:
             type(data.get(k)) is int and data[k] >= 0 for k in ("limit", "used", "remaining")
         ):
             raise Halt("invalid_usage_response")
+        if data["used"] + data["remaining"] != data["limit"]:
+            raise Halt("inconsistent_usage_response")
         self.quota = data
         self.since_usage = 0
         self.usage_day = self.tick().date()
@@ -270,11 +304,20 @@ class Client:
     def get(self, code, end):
         consecutive_429 = 0
         for attempt in range(4):
-            if self.quota is None or self.usage_day != self.tick().date() or self.since_usage >= 20:
-                self.refresh_usage()
+            day = self.tick().astimezone(JST).date().isoformat()
+            extra_cap = self.authorized_daily_cap(day)
             if (
-                self.quota["remaining"] - self.since_usage <= 50
-                or self.quota["used"] + self.since_usage >= 950
+                extra_cap is not None
+                or self.quota is None
+                or self.usage_day != self.tick().date()
+                or self.since_usage >= 20
+            ):
+                self.refresh_usage()
+            reserve = 50 if extra_cap is None else 0
+            remote_cap = min(1000, self.quota["limit"]) - reserve
+            if (
+                self.quota["remaining"] - self.since_usage <= reserve
+                or self.quota["used"] + self.since_usage >= remote_cap
             ):
                 raise Halt("remote_daily_headroom")
             response = self.send("data", code, end)

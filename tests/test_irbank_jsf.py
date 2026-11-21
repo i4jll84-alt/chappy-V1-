@@ -288,3 +288,130 @@ def test_first5_prioritizes_frozen_candidates_without_excluding_boundary_inputs(
     assert report["state"] == "complete"
     constructor.assert_called_once_with(tmp_path, "fixture-only", 17)
     fake_client.close.assert_called_once()
+
+
+def extra_client(
+    tmp_path, *, local_data=904, remote_used=904, allowance=96, stamp="2026-11-22T01:00:00+09:00"
+):
+    setup(tmp_path, initial=0)
+    p = tmp_path / "acquisition-policy.json"
+    policy = json.loads(p.read_bytes())
+    policy["daily_extensions"] = {
+        "2026-11-22": {
+            "baseline_data_attempts": 904,
+            "max_additional_data_attempts": allowance,
+        }
+    }
+    m.save(p, policy)
+    usage = {"used": remote_used}
+    calls = []
+
+    def serve(request):
+        calls.append(request.url.path)
+        if request.url.path.endswith("/usage"):
+            return httpx.Response(
+                200, json={"limit": 1000, "used": usage["used"], "remaining": 1000 - usage["used"]}
+            )
+        usage["used"] += 1
+        return httpx.Response(200, json=body())
+
+    c = m.Client(
+        tmp_path,
+        "fixture-secret",
+        200,
+        transport=httpx.MockTransport(serve),
+        pause=Mock(),
+        tick=lambda: datetime.fromisoformat(stamp),
+    )
+    c.db.executemany(
+        "INSERT INTO requests(day,started,kind) VALUES(?,?,?)",
+        [("2026-11-22", "fixture", "data")] * local_data
+        + [("2026-11-22", "fixture", "usage")] * 46,
+    )
+    c.db.commit()
+    return c, calls, usage
+
+
+def test_authorized_remaining_96_excludes_free_usage_but_stops_at_1000(tmp_path):
+    c, calls, usage = extra_client(tmp_path)
+    try:
+        for _ in range(96):
+            assert c.get("7203", "2021-11-19").status_code == 200
+        assert usage["used"] == 1000
+        assert sum(not path.endswith("/usage") for path in calls) == 96
+        assert c.sent == 192  # Each extra data attempt gets a fresh, uncharged usage check.
+        with pytest.raises(m.Halt, match="remote_daily_headroom"):
+            c.get("7203", "2021-11-19")
+        assert usage["used"] == 1000
+    finally:
+        c.close()
+
+
+def test_extra_allowance_survives_restart_and_counts_uncertain_data_attempts(tmp_path):
+    c, calls, usage = extra_client(tmp_path, local_data=1000, remote_used=999)
+    try:
+        with pytest.raises(m.Halt, match="authorized_daily_data_limit"):
+            c.get("7203", "2021-11-19")
+        assert usage["used"] == 999
+        assert calls == ["/v1/usage"]
+    finally:
+        c.close()
+
+
+def test_extra_allowance_honors_other_consumers_and_does_not_carry_to_next_day(tmp_path):
+    c, calls, usage = extra_client(tmp_path, remote_used=998)
+    try:
+        c.get("7203", "2021-11-19")
+        c.get("7203", "2021-11-19")
+        with pytest.raises(m.Halt, match="remote_daily_headroom"):
+            c.get("7203", "2021-11-19")
+        assert usage["used"] == 1000
+        c.tick = lambda: datetime.fromisoformat("2026-11-23T01:00:00+09:00")
+        c.db.executemany(
+            "INSERT INTO requests(day,started,kind) VALUES(?,?,?)",
+            [("2026-11-23", "fixture", "data")] * 950,
+        )
+        c.db.commit()
+        before = list(calls)
+        with pytest.raises(m.Halt, match="local_daily_request_limit"):
+            c.get("7203", "2021-11-19")
+        assert calls == before
+    finally:
+        c.close()
+
+
+@pytest.mark.parametrize("extra", [0, 97, True])
+def test_daily_extension_cannot_exceed_standard_or_use_invalid_numbers(tmp_path, extra):
+    c, calls, _ = extra_client(tmp_path, allowance=extra)
+    try:
+        with pytest.raises(m.Halt, match="invalid_daily_extension"):
+            c.get("7203", "2021-11-19")
+        assert not calls
+    finally:
+        c.close()
+
+
+def test_extra_allowance_preserves_trial_expiry_and_total_cap(tmp_path):
+    c, calls, _ = extra_client(tmp_path)
+    try:
+        c.policy["max_total_requests"] = 950
+        with pytest.raises(m.Halt, match="trial_total_request_limit"):
+            c.get("7203", "2021-11-19")
+        assert not calls
+        c.policy["max_total_requests"] = 9500
+        c.ends = c.tick()
+        with pytest.raises(m.Halt, match="outside_free_trial_window"):
+            c.get("7203", "2021-11-19")
+        assert not calls
+    finally:
+        c.close()
+
+
+def test_extension_refuses_a_missing_local_baseline(tmp_path):
+    c, calls, _ = extra_client(tmp_path, local_data=903)
+    try:
+        with pytest.raises(m.Halt, match="daily_extension_ledger_mismatch"):
+            c.get("7203", "2021-11-19")
+        assert calls == ["/v1/usage"]
+    finally:
+        c.close()
