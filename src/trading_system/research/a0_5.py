@@ -268,7 +268,7 @@ def apply_openings(project, s, through, now, capital=A0_5.capital):
         while pivot <= through:
             cal = inputs.calendar(project, pivot, now, [])
             todo.update(iso(d) for d in cal if first < iso(d) <= iso(through))
-            pivot += pd.Timedelta(days=21)
+            pivot += pd.Timedelta(21, unit="D")
     for date in sorted(todo):
         if stopped(project):
             raise ValueError("ペーパー停止中")
