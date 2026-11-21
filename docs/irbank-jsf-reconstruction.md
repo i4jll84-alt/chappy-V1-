@@ -61,6 +61,37 @@ data/irbank_jsf/acquisition-policy.jsonを必須とし、期限・日付範囲�
 従前のall_http設定と日付限定daily_extensionsも互換性を維持する。
 新しい予約期間ではdaily_scheduleの上限を使い、無料の使用量確認によって期間枠が早く尽きないようにした。
 
+## PC・Codex起動時の補完
+
+ユーザーの追加指示により、WindowsタスクIRBANK-Trial-CodexStartupを登録した。
+ログオン時および1分間隔で、同一WindowsセッションのCodex本体の起動を確認する。
+renderer・補助プロセス・CLIは対象にしない。プロセスのコマンドラインは保存しない。
+実行先はこのプロジェクトの.venv/Scripts/pythonw.exeで、コンソールを表示しない。
+Windows標準PowerShellは読み取り専用のプロセス確認にだけ使い、実行ポリシーやPCの電源設定は変更しない。
+
+直前の21時の取得が未完了なら、次にPC/Codexが利用可能になった確認時に同じ日次処理を呼ぶ。
+最初の予約時刻より前には開始しない。前夜の枠を消費済みなら翌朝に再取得しない。
+翌日に補完する場合はその日の残枠だけを使い、前日分を繰り越して1,000回を超えない。
+既取得原文とcheckpointを利用し、プランA前半5年の優先を維持する。
+
+21時の予約と起動補完はdaily-dispatchロックを共有する。
+二重起動はalready_runningとして扱い、異常終了としない。
+失敗は同一アプリ起動・同一予約時刻に対して毎分再試行せず、次のアプリ起動または次の21時に再開できる。
+中断された処理は完了とせず、ロック解放後にcheckpointから復旧する。
+予約irbank-5がPAUSEDまたは削除済みの場合、起動補完は通信しない。
+
+通常ユーザー権限・多重起動IgnoreNew・StartWhenAvailable有効。
+タイマーとログオンの両トリガーは2026-12-01 22:30 JSTで終了し、期限切れタスクは1日後に削除される。
+プログラム側も日次1,000・期間合計10,000・無料期限を毎回確認する。
+補完記録はdata/irbank_jsf/startup/status.jsonと時刻別JSONへ保存する。
+
+確認: scripts/check_irbank_startup.ps1 -InspectOnly
+登録内容の確認: scripts/register_irbank_startup.ps1 -Preview
+関連99件の試験と全体Ruff検査が成功。
+実機ではタスクの実登録・期限・実行結果0を読み戻し、開始前に追加API通信しないことを確認した。
+将来の電源オフ・再起動そのものは実行しておらず、翌朝・翌日・失敗後の再開は仮想時刻と隔離台帳で検証した。
+検証記録・タスクXMLはローカルdata/offline-verification/irbank-startup-20261122/に保存する。
+
 ## 取得順序
 
 同日の上場マスター・国内普通株・東証旧市場を含む対象を固定し、上場廃止銘柄も除外しない。

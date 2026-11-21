@@ -151,7 +151,13 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         result = inspect(args.project / "data/irbank_jsf") if args.inspect else run(args.project)
-    except (jsf.Halt, ValueError, KeyError, TypeError, OSError, sqlite3.Error) as exc:
+    except ValueError as exc:
+        result = (
+            {"state": "already_running"}
+            if str(exc) == "broker_state_already_open"
+            else {"state": "needs_attention", "reason": type(exc).__name__}
+        )
+    except (jsf.Halt, KeyError, TypeError, OSError, sqlite3.Error) as exc:
         reason = str(exc) if isinstance(exc, jsf.Halt) else type(exc).__name__
         result = {"state": "needs_attention", "reason": reason}
     print(json.dumps(result, ensure_ascii=False))
