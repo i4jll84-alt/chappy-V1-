@@ -4,6 +4,7 @@ from datetime import datetime
 import pandas as pd
 import pytest
 
+from trading_system.research import c1_execution
 from trading_system.research import c1_inputs as src
 
 
@@ -113,6 +114,17 @@ def test_earnings_unknown_and_explicit_none_frozen_at_cutoff(tmp_path, monkeypat
     dates, verified = src._earnings(tmp_path, "2026-11-20", cutoff(), refs, universe)
     assert verified
     assert dates == {"10000": ["2026-11-24"], "10020": [], "10030": [], "10040": []}
+    candidates = [
+        dict(code=code, sector="3650", close=1000, atr14=20, deviation=deviation)
+        for code, deviation in (("10000", -0.02), ("10040", -0.01))
+    ]
+    sessions = ["2026-11-20", "2026-11-24", "2026-11-25", "2026-11-26", "2026-11-27"]
+    plan = c1_execution.freeze_plan(
+        c1_execution.initial_account(), sessions[0], sessions[1], candidates, {}, dates, sessions
+    )
+    assert plan["enable_earnings_guard"] is True
+    assert [r["code"] for r in plan["buys"]] == ["10040"]  # Not listed in the verified file.
+    assert [(r["code"], r["reason"]) for r in plan["skips"]] == [("10000", "earnings_window")]
     assert len(refs) == 2
     # Unknown dates stay unresolved even with a complete file. Missing and future
     # snapshots cannot establish that all unlisted companies are clear to buy.
@@ -191,17 +203,29 @@ def test_missing_archive_marks_from_daily_receipt_and_future_topix_block_entries
 
 
 @pytest.mark.parametrize(
-    "volume,opening,expected",
-    [(0, None, True), (None, None, False), (0, "bad", False), (0, 2, False)],
+    "changes,expected",
+    [
+        ({}, True),
+        ({"C": 100}, False),
+        ({"O": "bad"}, False),
+        ({"Vo": 0}, False),
+        ({"Va": 0}, False),
+        ({"Vo": 100}, False),
+        ({"O": "", "H": "", "L": "", "C": "", "Vo": "", "Va": ""}, True),
+    ],
 )
-def test_official_no_trade_requires_explicit_zero_volume_and_four_null_prices(
-    tmp_path, monkeypatch, volume, opening, expected
+def test_official_no_trade_requires_six_null_fields_on_an_existing_row(
+    tmp_path, monkeypatch, changes, expected
 ):
     day = "2026-11-20"
     monkeypatch.setattr(src, "_receipt", lambda *_: {})
-    row = dict(Date=day, Code="10000", O=opening, H=None, L=None, C=None, Vo=volume)
+    row = dict(Date=day, Code="10000", O=None, H=None, L=None, C=None, Vo=None, Va=None)
+    row.update(changes)
     monkeypatch.setattr(src, "dated_inputs", lambda *_: ({"10000": [row]}, {}, []))
-    assert src.load_bars(tmp_path, day, cutoff())["10000"]["no_trade"] is expected
+    bars = src.load_bars(tmp_path, day, cutoff())
+    assert bars["10000"]["no_trade"] is expected and "99990" not in bars
+    del row["Va"]
+    assert not src.load_bars(tmp_path, day, cutoff())["10000"]["no_trade"]
 
 
 def test_absent_calendar_does_not_invent_historical_days_or_entries(tmp_path):

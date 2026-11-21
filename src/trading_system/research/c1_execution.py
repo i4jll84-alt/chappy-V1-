@@ -22,7 +22,7 @@ class C1UnverifiedBar(ValueError):
 
 
 def _no_trade(row):
-    # The input adapter sets this only from an official zero-volume, all-null OHLC row.
+    # The input adapter verifies six null market fields on an existing official bar.
     return row.get("no_trade") is True and all(
         row.get(field) is None for field in ("open", "high", "low", "close")
     )

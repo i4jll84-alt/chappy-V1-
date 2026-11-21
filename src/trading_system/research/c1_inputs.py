@@ -241,11 +241,10 @@ def load_bars(project, date, cutoff):
             clean[key] = float(value) if pd.notna(value) and math.isfinite(value) else None
         ex = row.get("ExRT")
         clean["ex_rights"] = str(ex) if pd.notna(ex) and ex != "" else None
-        volume = pd.to_numeric(row.get("Vo"), errors="coerce")
-        clean["no_trade"] = bool(
-            pd.notna(volume)
-            and volume == 0
-            and all(k in row and (pd.isna(row[k]) or row[k] == "") for k in ("O", "H", "L", "C"))
+        # J-Quants daily bars retain a dated row with six null market fields
+        # for a verified no-trade day. A missing row or partial observation is unknown.
+        clean["no_trade"] = all(
+            k in row and (pd.isna(row[k]) or row[k] == "") for k in ("O", "H", "L", "C", "Vo", "Va")
         )
         result[str(row["Code"])] = clean
     return result
