@@ -22,7 +22,7 @@ STEP_LABELS = {
     "legacy_close": "既存口座の記帳",
     "short_public": "空売り公表情報",
     "review": "日次レビュー",
-    "plans": "A・B口座更新",
+    "plans": "ペーパー口座更新",
     "a_preopen": "Aプランの寄付前判定（初回）",
     "native_evening": "Bプランの引け判定",
     "native_positions": "Bプランの建玉・受渡",
@@ -224,7 +224,7 @@ def morning_evidence(report, day, issue, expired=False):
     return (
         f"{title}　　対象寄付日 {day}　　選定日 {report.get('signal_date') or '—'}\n"
         f"朝の開始 {check_time(report, 'started_at', day)}　　"
-        f"両プラン確定 {check_time(report, 'decision_at', day)}　　"
+        f"全口座確定 {check_time(report, 'decision_at', day)}　　"
         f"期限 {check_time(report, 'deadline', day)} JST"
     )
 
@@ -316,7 +316,7 @@ class PlanDashboard:
         self.notebook = notebook
 
         self.frame = tab = ttk.Frame(notebook, padding=(20, 12))
-        notebook.add(tab, text="A・Bの稼働状況")
+        notebook.add(tab, text="各プランの稼働状況")
         heading = ttk.Frame(tab)
         heading.pack(fill="x")
         ttk.Label(heading, text="フォワードテスト", style="Title.TLabel").pack(side="left")
@@ -358,7 +358,7 @@ class PlanDashboard:
             self.accounts.heading(key, command=lambda field=key: self.select_account_field(field))
         self.accounts.bind("<<TreeviewSelect>>", lambda _e: self.show_account())
         ttk.Label(
-            tab, text="A・Bの行を選び、項目名（純資産・保有数など）を押すと詳細を表示します。"
+            tab, text="口座の行を選び、項目名（純資産・保有数など）を押すと詳細を表示します。"
         ).pack(anchor="w", pady=(4, 0))
         self.detail = tk.StringVar(master=tab)
         self.detail_box = ttk.LabelFrame(tab, text="口座の詳細", padding=(8, 4))
@@ -699,7 +699,7 @@ class PlanDashboard:
         self.morning = proof
         self.morning_label.set(morning_evidence(proof, day, proof_issue, expired))
         self.plan_proof.set(
-            "\n".join(line for k in ("A", "B") if (line := plan_evidence(proof, k, expired)))
+            "\n".join(line for k in ("A", "B", "C") if (line := plan_evidence(proof, k, expired)))
         )
         self.checked.set(
             "ペーパー口座　　最終確認 " + (summary_issue or clock_label(summary.get("checked_at")))

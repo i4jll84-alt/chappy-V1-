@@ -17,6 +17,15 @@
       "version": "a0-5-guarded-v1",
       "start": "2026-11-19",
       "capital": 3000000
+    },
+    {
+      "id": "C",
+      "name": "上昇トレンド内の押し目買い",
+      "stage": "active",
+      "adapter": "plan_c_forward",
+      "version": "c1-pullback-guarded-v1",
+      "start": "2026-11-24",
+      "capital": 3000000
     }
   ]
 }

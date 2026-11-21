@@ -16,6 +16,8 @@ from trading_system.storage.store import atomic_write, canonical
 
 JST = ZoneInfo("Asia/Tokyo")
 LABELS = {
+    "guarded": "寄付前に確定・新規買い停止",
+    "verified_cutoff": "寄付前に確定",
     "met": "朝の起動だけで寄付前に確定",
     "prior_inputs": "寄付前に確定・起動前の受領資料を使用",
     "evening_run": "寄付前に確定・前夜にも起動",
@@ -47,8 +49,8 @@ def apply_state(item, state, reason):
 
 
 def official(project, key, signal, target, spec):
-    if key == "A":
-        path = project / "data/plan-forward/accounts/A/sessions" / target / "decision.json"
+    if key in ("A", "C"):
+        path = project / "data/plan-forward/accounts" / key / "sessions" / target / "decision.json"
         return read(path) if path.is_file() else None
     capital = spec["capital"]
     account = project / "data/a0-5-paper/accounts" / str(capital)
@@ -167,7 +169,7 @@ def assess_plan(project, key, spec, signal, target, start, deadline, checked):
         item["decision_sha256"] = hashlib.sha256(canonical(doc).encode()).hexdigest()
         ds, dt = (
             (doc.get("signal_date"), doc.get("target"))
-            if key == "A"
+            if key in ("A", "C")
             else (doc.get("date"), doc.get("order_date"))
         )
         state = doc.get("status" if key == "A" else "state")
@@ -177,17 +179,19 @@ def assess_plan(project, key, spec, signal, target, start, deadline, checked):
             return apply_state(item, "stopped", "判定時の停止を記録")
         if state == "missed_preopen":
             return apply_state(item, "missed", "寄付前判定の欠測を記録")
-        if state not in ("ready", "blocked"):
+        if state not in ("ready", "blocked", "insufficient_data"):
             return apply_state(item, "unverified", "確定状態が未確認")
         if state == "blocked":
             return apply_state(
                 item, "pending" if checked < deadline else "missed", "必要な入力が未確定"
             )
 
-        picks = doc["picks"] if key == "A" else doc["candidates"]
+        picks = doc[{"A": "picks", "B": "candidates", "C": "ranked"}[key]]
         item["candidate_count"] = len(picks)
         if key == "B":
             item["order_count"] = len(doc["orders"])
+        elif key == "C":
+            item["order_count"] = len(doc["plan"]["buys"])
         timed = timestamp(doc.get("recorded_at"))
         cutoff = timestamp(doc.get("cutoff"))
         if not timed:
@@ -209,12 +213,17 @@ def assess_plan(project, key, spec, signal, target, start, deadline, checked):
         )
         if timed >= deadline:
             return apply_state(item, "missed", "確定完了が09:00以降")
+        if key == "C" and state == "insufficient_data":
+            return apply_state(item, "guarded", "資料不足による判定不可。既存建玉の出口は継続")
         if timed < start:
             return apply_state(item, "preexisting", "朝の初回起動より前に確定済み")
         if cutoff is None:
             return apply_state(item, "unverified", "入力締切を確認できない")
         if doc.get("decision_origin") == "evening_inputs":
             return apply_state(item, "prior_inputs", "前営業日までにそろった入力で朝に確定")
+        if key == "C":
+            # The C receipts cover a longer historical window than the A/B morning audit.
+            return apply_state(item, "verified_cutoff", "保存された締切時点の資料から寄付前に確定")
         return apply_state(item, *source_timing(project, key, doc, signal, start, cutoff))
     except (
         OSError,
@@ -267,8 +276,15 @@ def record_startup(project, report, *, now=None):
         k: assess_plan(project, k, specs.get(k), signal, target, start, deadline, checked)
         for k in ("A", "B")
     }
+    if specs.get("C", {}).get("stage") == "active" and signal >= specs["C"]["start"]:
+        rows["C"] = assess_plan(project, "C", specs["C"], signal, target, start, deadline, checked)
     b_account = project / "data/a0-5-paper/accounts" / str(specs.get("B", {}).get("capital", 0))
     switches = {
+        "C": (project / "data/plan-forward/accounts/C/STOP").exists()
+        or (project / "data/plan-forward/STOP").exists()
+        or (
+            project / "data/plan-forward/accounts/C/sessions" / target / "preopen_stop.json"
+        ).exists(),
         "A": (
             (project / "data/plan-forward/accounts/A/STOP").exists()
             or (
@@ -284,7 +300,7 @@ def record_startup(project, report, *, now=None):
     }
     for key, item in rows.items():
         if item["state"] != "outside" and (
-            switches[key] or (project / "data/swing-forward/STOP").exists()
+            switches[key] or (key != "C" and (project / "data/swing-forward/STOP").exists())
         ):
             item["readiness_state"] = item["state"]
             apply_state(item, "stopped", item["label"] + "。ペーパー停止・無効化の記録あり")
@@ -297,6 +313,8 @@ def record_startup(project, report, *, now=None):
             "missed",
             "unverified",
             "pending",
+            "guarded",
+            "verified_cutoff",
             "preexisting",
             "prior_inputs",
             "met",

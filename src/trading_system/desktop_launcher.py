@@ -365,7 +365,7 @@ class Launcher:
                 messagebox.showwarning(
                     "設定", "保存済み設定を読み込めません。初期設定を表示します。"
                 )
-        window.title("個別株ツール — A・Bプランとデータ取得")
+        window.title("個別株ツール — ペーパー口座とデータ取得")
         window.geometry("960x740")
         window.minsize(820, 700)
         window.option_add("*Font", ("Yu Gothic UI", 11))

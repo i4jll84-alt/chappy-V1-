@@ -65,6 +65,20 @@ def saved_prices(project, now):
 
 
 def positions(project, key, plan):
+    if key == "C":
+        return [
+            dict(
+                plan=key,
+                code=code,
+                shares=positive(pos["shares"]),
+                entry_date=pos["entry_date"],
+                entry_price=positive(pos["entry_price"]),
+                acquisition_cost=positive(pos["cost"]),
+                holding_date=plan.get("holdings_date") or plan.get("last_mark"),
+                note="",
+            )
+            for code, pos in sorted(plan["positions"].items())
+        ]
     if key == "A":
         held = plan.get("positions")
         if not isinstance(held, dict):
@@ -145,7 +159,7 @@ def positions(project, key, plan):
 
 def holdings_snapshot(project, plans, now):
     rows, statuses = [], []
-    for key in ("A", "B"):
+    for key in ("A", "B", *(["C"] if "C" in plans else [])):
         if key not in plans:
             statuses.append(f"{key}：口座記録待ち")
             continue

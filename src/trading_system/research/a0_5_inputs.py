@@ -74,8 +74,8 @@ def bulk(root, endpoint, columns, lo, hi, cutoff, refs):
 
 def calendar(project, day, cutoff, refs):
     fields = ["Date", "HolDiv"]
-    lo = iso(day - pd.Timedelta(days=FINANCIAL_HISTORY_DAYS))
-    hi = iso(day + pd.Timedelta(days=21))
+    lo = iso(day - pd.Timedelta(FINANCIAL_HISTORY_DAYS, unit="D"))
+    hi = iso(day + pd.Timedelta(21, unit="D"))
     parts = bulk(
         project / "data/jquants/history", "/markets/calendar", fields, lo, hi, cutoff, refs
     )

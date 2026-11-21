@@ -447,7 +447,7 @@ def test_holdings_tab_updates_prices_without_changing_account_snapshot(tmp_path,
         monkeypatch.setattr(view.holdings_reader, "read", reader)
         window.update_idletasks()
         assert [notebook.tab(tab, "text") for tab in notebook.tabs()] == [
-            "A・Bの稼働状況",
+            "各プランの稼働状況",
             "保有銘柄",
         ]
         values = view.holdings.item(view.holdings.get_children()[0], "values")
