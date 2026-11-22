@@ -102,9 +102,14 @@ def test_missed_evening_resumes_next_morning_using_only_todays_remaining_quota(t
     blocked.assert_not_called()
 
 
-def test_successful_previous_night_does_not_fetch_again_next_morning(tmp_path):
+@pytest.mark.parametrize("limit", [200, 1000])
+def test_successful_previous_night_does_not_fetch_again_next_morning(tmp_path, limit):
     root, automation = prepare(tmp_path)
-    record(root, "2026-11-23", 1000)
+    policy_path = root / "acquisition-policy.json"
+    policy = json.loads(policy_path.read_bytes())
+    policy["daily_schedule"]["max_data_requests"] = limit
+    jsf.save(policy_path, policy)
+    record(root, "2026-11-23", limit)
     blocked = Mock(side_effect=AssertionError("unexpected acquisition"))
     assert (
         startup.check(tmp_path, automation, at(), 1, moment=at(), runner=blocked)["state"]

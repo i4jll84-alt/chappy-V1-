@@ -208,16 +208,21 @@ def test_daily_schedule_cannot_raise_standard_cap(tmp_path):
         c.close()
 
 
-def test_scheduled_client_uses_last_slot_and_usage_never_consumes_data_quota(tmp_path):
+@pytest.mark.parametrize("limit", [200, 1000])
+def test_scheduled_client_uses_last_slot_and_usage_never_consumes_data_quota(tmp_path, limit):
     root = prepare(tmp_path)
-    record(root, "2026-11-23", 999)
+    policy_path = root / "acquisition-policy.json"
+    policy = json.loads(policy_path.read_bytes())
+    policy["daily_schedule"]["max_data_requests"] = limit
+    jsf.save(policy_path, policy)
+    record(root, "2026-11-23", limit - 1)
     record(root, "2026-11-23", 1200, "usage")
-    used = [999]
+    used = [limit - 1]
 
     def serve(request):
         if request.url.path.endswith("/usage"):
             return httpx.Response(
-                200, json={"limit": 1000, "used": used[0], "remaining": 1000 - used[0]}
+                200, json={"limit": limit, "used": used[0], "remaining": limit - used[0]}
             )
         used[0] += 1
         return httpx.Response(200, json={})
@@ -227,7 +232,9 @@ def test_scheduled_client_uses_last_slot_and_usage_never_consumes_data_quota(tmp
         assert c.get("7203", "2021-11-19").status_code == 200
         with pytest.raises(jsf.Halt, match="remote_daily_headroom"):
             c.get("7203", "2021-11-19")
-        assert used[0] == 1000 and c.sent == 3
-        assert daily.inspect(root, stamp())["daily_data_attempts"] == 1000
+        assert used[0] == limit and c.sent == 3
+        status = daily.inspect(root, stamp())
+        assert status["daily_data_attempts"] == status["daily_data_limit"] == limit
+        assert status["state"] == "daily_quota_reached"
     finally:
         c.close()
