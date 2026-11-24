@@ -302,8 +302,15 @@ class Client:
             if data_count + initial_data_today >= cap:
                 raise Halt("authorized_daily_data_limit")
         if self.data_only:
-            total = self.db.execute("SELECT count(*) FROM requests WHERE kind='data'").fetchone()[0]
-            if kind == "data" and total + self.initial_data >= self.policy["max_total_requests"]:
+            from trading_system.research.irbank_budget import data_totals
+
+            try:
+                totals = data_totals(self.policy, self.db)
+            except (ValueError, KeyError, TypeError) as exc:
+                raise Halt("trial_budget_ledger_invalid") from exc
+            if self.policy.get("renewed_trial_budget") and day < totals["start"]:
+                raise Halt("outside_free_trial_window")
+            if kind == "data" and totals["budget"] >= self.policy["max_total_requests"]:
                 raise Halt("trial_total_request_limit")
         else:
             total = self.db.execute("SELECT count(*) FROM requests").fetchone()[0]
@@ -439,6 +446,10 @@ def work_window(archive, client, phase, code, start, end):
 
 
 def run(project, root, max_requests=950, phase="audit"):
+    if phase in ("first5_required", "history_required"):
+        from trading_system.research.irbank_priority import run as priority_run
+
+        return priority_run(project, root, max_requests, phase.removesuffix("_required"))
     from trading_system.research.irbank_universe import prepare
 
     universe = prepare(project, root)
@@ -560,7 +571,17 @@ def main(argv=None):
     parser.add_argument("--project", type=Path, default=Path(__file__).resolve().parents[3])
     parser.add_argument("--max-requests", type=int, default=950)
     parser.add_argument(
-        "--phase", choices=("all", "audit", "needed", "first5", "history"), default="all"
+        "--phase",
+        choices=(
+            "all",
+            "audit",
+            "needed",
+            "first5",
+            "history",
+            "first5_required",
+            "history_required",
+        ),
+        default="all",
     )
     opts = parser.parse_args(argv)
     project = opts.project.resolve()

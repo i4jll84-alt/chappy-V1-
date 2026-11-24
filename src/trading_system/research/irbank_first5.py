@@ -52,6 +52,13 @@ def inputs(project, root):
         raise ValueError("first5_calendar_invalid")
     pools = {day: technical["days"][day] for day in days[start:end]}
     codes = sorted({row["code"][:-1] for pool in pools.values() for row in pool})
+    from . import irbank_priority as priority
+
+    if priority.enabled(root):
+        states, acquisition = priority.ready_states(root, technical)
+        if set(priority.target_dates(technical)) != set(codes):
+            raise ValueError("first5_required_targets_mismatch")
+        return technical, days, pools, states, acquisition
     pending = []
     states = {}
     for code in codes:
@@ -121,6 +128,18 @@ def approximate_ranks(root, days, pools, states):
     values, pins = {}, {}
     for code, dates in needs.items():
         state = states[code[:-1]]
+        from . import irbank_priority as priority
+
+        if state.get("coverage_mode") == priority.MODE:
+            checked = priority.coverage(evidence.archive, code[:-1], dates)
+            if state["required_dates"] != sorted(dates) or checked["state"] != "complete":
+                raise ValueError("required_dates_not_covered")
+            rows, _, _ = evidence.read(code[:-1])
+            values[code] = {d: rows[d] for d in dates if d in rows}
+            for path in sorted((root / "raw" / code[:-1]).glob("*/*")):
+                if path.name in ("receipt.json", "response.json"):
+                    pins[str(path)] = shared.digest(path)
+            continue
         expected_to = shared.FIRST5_END
         if not state["pages"]:
             raise ValueError("complete_window_has_no_pages")
@@ -194,6 +213,8 @@ def replay_branch(project, lab, modules, days, ranks, scenario, evidence):
         Path(compare.__file__),
         Path(__file__).with_name("irbank_jsf.py"),
         Path(__file__).with_name("irbank_required.py"),
+        Path(__file__).with_name("irbank_priority.py"),
+        Path(__file__).with_name("irbank_budget.py"),
         Path(swing_credit.__file__),
         *sorted((lab / "strategy_lab").glob("*.py")),
         *sorted((project / "scripts/swing_gap_atr").glob("*.py")),

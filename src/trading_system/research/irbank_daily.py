@@ -44,15 +44,17 @@ def inspect(root, stamp=None):
         daily = db.execute(
             "SELECT count(*) FROM requests WHERE day=? AND kind='data'", (day,)
         ).fetchone()[0]
-        total = db.execute("SELECT count(*) FROM requests WHERE kind='data'").fetchone()[0]
+        from .irbank_budget import data_totals
+
+        totals = data_totals(policy, db)
     daily += policy["initial_data_requests"] if stamp.date() == begins.date() else 0
-    total += policy["initial_data_requests"]
+    total = totals["lifetime"]
     state = "due"
     if stamp >= ends or stamp.date() > through:
         state = "expired"
     elif stamp < begins or stamp.date() < start:
         state = "not_started"
-    elif total >= policy["max_total_requests"]:
+    elif totals["budget"] >= policy["max_total_requests"]:
         state = "trial_budget_exhausted"
     elif daily >= schedule["max_data_requests"]:
         state = "daily_quota_reached"
@@ -68,7 +70,10 @@ def inspect(root, stamp=None):
         "daily_data_limit": schedule["max_data_requests"],
         "total_data_limit": policy["max_total_requests"],
         "remaining_daily_data": max(0, schedule["max_data_requests"] - daily),
-        "remaining_trial_data": max(0, policy["max_total_requests"] - total),
+        "trial_data_attempts": totals["budget"],
+        "preserved_prior_data_attempts": totals["prior"],
+        "trial_budget_start": totals["start"],
+        "remaining_trial_data": max(0, policy["max_total_requests"] - totals["budget"]),
     }
 
 
@@ -92,8 +97,16 @@ def run(project):
             "batches": [],
         }
         stamp = jsf.now().strftime("%H%M%S-%f")
-        phase = "first5"
-        for _ in range(6):
+        from .irbank_priority import enabled
+
+        phases = (
+            ["first5_required", "history_required", "first5", "history"]
+            if enabled(root)
+            else ["first5", "history"]
+        )
+        phase_index = 0
+        phase = phases[phase_index]
+        for _ in range(10):
             current = inspect(root)
             if current["state"] != "due":
                 report["state"] = current["state"]
@@ -108,8 +121,9 @@ def run(project):
             report["batches"].append({"phase": phase, **batch})
             reason = batch.get("reason")
             if batch["state"] == "complete":
-                if phase == "first5":
-                    phase = "history"
+                if phase_index + 1 < len(phases):
+                    phase_index += 1
+                    phase = phases[phase_index]
                     continue
                 report["state"] = "archive_complete"
                 break
