@@ -19,6 +19,8 @@ from trading_system.storage.store import atomic_write, canonical
 
 
 def tables(db):
+    # Quality checks must not block the live writer while reading saved samples.
+    db.execute("PRAGMA journal_mode=WAL")
     db.executescript("""
         CREATE TABLE IF NOT EXISTS samples(
           id INTEGER PRIMARY KEY, symbol TEXT, operation TEXT, started_at TEXT, known_at TEXT,
@@ -327,7 +329,12 @@ def run(
                 "broker_state_already_open": "collector_already_active",
                 "api_password_format_invalid": "api_password_format_invalid",
             }
-            status("failed", reasons.get(str(exc), "check_local_capture"))
+            reason = reasons.get(str(exc), "check_local_capture")
+            if isinstance(exc, sqlite3.OperationalError) and getattr(
+                exc, "sqlite_errorcode", None
+            ) in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+                reason = "capture_database_busy"
+            status("failed", reason)
             raise
 
 

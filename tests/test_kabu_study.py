@@ -1,6 +1,7 @@
 import gzip
 import json
 import sqlite3
+from contextlib import closing
 from datetime import timedelta
 
 import httpx
@@ -246,3 +247,75 @@ def test_retry_waits_for_station_after_network_loss_and_keeps_failed_sample(tmp_
             ("board", "network_request_failed"),
             ("board", "observed_book"),
         ]
+
+
+def test_saved_board_reader_does_not_block_live_sample_commit(tmp_path):
+    path = tmp_path / "research.sqlite"
+    record = {
+        "http_status": 200,
+        "code": "7203",
+        "operation": "board",
+        "read_started_at": T.isoformat(),
+        "read_completed_at": T.isoformat(),
+        "reason": None,
+        "outcome": "ok",
+    }
+    raw = json.dumps(
+        {
+            "Symbol": "7203",
+            "Exchange": 1,
+            "CurrentPrice": 100,
+            "CurrentPriceTime": T.isoformat(),
+            "Sell1": {"Price": 101, "Qty": 200},
+            "Buy1": {"Price": 99, "Qty": 100},
+        }
+    ).encode()
+    with closing(sqlite3.connect(path, timeout=0.05)) as writer:
+        kabu_study.tables(writer)
+        assert kabu_study.store_sample(writer, record, raw) == "observed_book"
+        with closing(sqlite3.connect(path, timeout=0.05)) as reader:
+            reader.execute("BEGIN")
+            assert reader.execute("SELECT count(*) FROM samples").fetchone() == (1,)
+            assert kabu_study.store_sample(writer, record, raw) == "observed_book"
+            assert writer.execute("SELECT count(*) FROM samples").fetchone() == (2,)
+            assert reader.execute("SELECT count(*) FROM samples").fetchone() == (1,)
+            reader.rollback()
+            assert reader.execute("SELECT count(*) FROM samples").fetchone() == (2,)
+        assert writer.execute("SELECT count(*) FROM levels").fetchone() == (4,)
+        for (blob,) in writer.execute("SELECT raw_board_gzip FROM samples"):
+            assert gzip.decompress(blob) == raw
+
+
+def test_database_contention_reports_storage_issue_without_exposing_details(tmp_path, monkeypatch):
+    root = make_panel(tmp_path)
+    error = sqlite3.OperationalError("sensitive filesystem detail")
+    error.sqlite_errorcode = sqlite3.SQLITE_BUSY
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            self.closed = False
+
+        def read(self, code):
+            raise error
+
+        def close(self):
+            self.closed = True
+
+    with pytest.raises(sqlite3.OperationalError):
+        kabu_study.run(
+            tmp_path,
+            int(T.timestamp() * 1e9),
+            "none",
+            clock=lambda: T,
+            prompt=lambda *args, **kwargs: "password1",
+            listener_ready=lambda: True,
+            client_factory=FakeClient,
+        )
+    status = json.loads((root / "status.json").read_bytes())
+    assert status["state"] == "failed"
+    assert status["reason"] == "capture_database_busy"
+    assert "sensitive" not in (root / "status.json").read_text()
+    from trading_system.research_status import terminal_guidance
+
+    guidance = terminal_guidance(status["state"], status["reason"])
+    assert "DB" in guidance and "API" not in guidance

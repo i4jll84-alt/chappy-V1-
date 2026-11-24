@@ -1,6 +1,7 @@
 import gzip
 import json
 import sqlite3
+from contextlib import closing
 from datetime import datetime, timedelta
 from unittest.mock import Mock
 
@@ -444,3 +445,30 @@ def test_optional_index_failure_retains_stock_data_and_clears_status_on_recovery
         first = json.loads(gzip.decompress(rows[0][1]))
         assert first["index_issue"]["stage"] == "indexes"
         assert first["items"] == sample()["items"]
+
+
+def test_saved_frame_reader_does_not_block_live_frame_commit(tmp_path):
+    path = tmp_path / "research.sqlite"
+    with closing(sqlite3.connect(path, timeout=0.05)) as writer:
+        p.initialize(writer)
+        payload = sample()
+        assert p.save(writer, CODES, payload, T, T)["bar_versions"] == 62
+        with closing(sqlite3.connect(path, timeout=0.05)) as reader:
+            reader.execute("BEGIN")
+            assert reader.execute("SELECT count(*) FROM frames").fetchone() == (1,)
+            payload["items"][0]["bars"][0][5] = 102
+            assert p.save(writer, CODES, payload, T, T)["bar_versions"] == 1
+            assert writer.execute("SELECT count(*) FROM frames").fetchone() == (2,)
+            assert reader.execute("SELECT count(*) FROM frames").fetchone() == (1,)
+            reader.rollback()
+            assert reader.execute("SELECT count(*) FROM frames").fetchone() == (2,)
+        rows = writer.execute("SELECT raw_gzip FROM frames ORDER BY id").fetchall()
+        closes = [json.loads(gzip.decompress(r[0]))["items"][0]["bars"][0][5] for r in rows]
+        assert closes == [101, 102]
+
+
+def test_database_busy_reason_is_distinct_from_other_storage_errors():
+    busy = sqlite3.OperationalError("private details")
+    busy.sqlite_errorcode = sqlite3.SQLITE_BUSY
+    assert p.failure_reason(busy) == "capture_database_busy"
+    assert p.failure_reason(sqlite3.IntegrityError("private details")) == "research_storage_error"

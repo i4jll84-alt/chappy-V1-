@@ -132,6 +132,8 @@ def active_status(broker, data, now):
 
 
 def terminal_guidance(state, reason):
+    if reason == "capture_database_busy":
+        return "保存DBが使用中です。外部操作を終え、取得を再開してください。"
     if reason == "daily_panel_missing":
         return "本日用の候補がありません。前営業日の日足と候補の保存結果を確認してください。"
     if reason == "stop_or_cutoff":

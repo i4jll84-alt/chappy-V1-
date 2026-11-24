@@ -69,6 +69,8 @@ def failure_reason(exc):
     if isinstance(exc, ValueError) and str(exc) in FAILURE_MESSAGES:
         return str(exc)
     if isinstance(exc, sqlite3.Error):
+        if getattr(exc, "sqlite_errorcode", None) in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+            return "capture_database_busy"
         return "research_storage_error"
     return "research_start_failed"
 
@@ -153,6 +155,8 @@ def quote_state(q, end):
 
 
 def initialize(db):
+    # Let saved-data readers coexist with the intraday acquisition writer.
+    db.execute("PRAGMA journal_mode=WAL")
     db.executescript("""
         CREATE TABLE IF NOT EXISTS frames(
             id INTEGER PRIMARY KEY, started_at TEXT, known_at TEXT, state TEXT, raw_gzip BLOB);
