@@ -37,6 +37,9 @@ function Get-ReadFailure($exception, $stage, $affectedSymbol) {
 # property is slow enough to delay the next market observation.
 Add-Type -ReferencedAssemblies Microsoft.CSharp,System.Core -TypeDefinition @"
 public static class RakutenExcelRead {
+    public static void Clear(dynamic target) { target.ClearContents(); }
+    public static void Formula(dynamic target, string value) { target.Formula2 = value; }
+
     public static object Property(dynamic target, string name) {
         switch (name) {
             case "Ready": return target.Ready;
@@ -76,6 +79,28 @@ function Get-ExcelProperty($target, [string]$name, [object[]]$arguments) {
             $attempt++
             $retryState.delay_ms += $delay
             $retryLog.Add(@{stage=$stage; property=$name; symbol=$affectedSymbol;
+                hresult=$issue.hresult; attempt=$attempt; delay_ms=$delay})
+            Start-Sleep -Milliseconds $delay
+        }
+    }
+}
+function Invoke-ExcelMutation($target, [string]$operation, [string]$value) {
+    # Only idempotent operations on a prevalidated research chart are permitted.
+    if ($operation -notin @('ClearContents','Formula2')) {throw 'chart'}
+    $attempt=0
+    while ($true) {
+        try {
+            if ($operation -eq 'ClearContents') {[RakutenExcelRead]::Clear($target)}
+            else {[RakutenExcelRead]::Formula($target,$value)}
+            return
+        } catch {
+            $issue=Get-ReadFailure $_.Exception $stage $affectedSymbol
+            $delay=[Math]::Min(600,200 * ($attempt+1))
+            if ($issue.reason -notin @('excel_call_rejected','excel_retry_later') -or
+                $retryState.delay_ms + $delay -gt 1800) {throw}
+            $attempt++
+            $retryState.delay_ms += $delay
+            $retryLog.Add(@{stage=$stage; property=$operation; symbol=$affectedSymbol;
                 hresult=$issue.hresult; attempt=$attempt; delay_ms=$delay})
             Start-Sleep -Milliseconds $delay
         }
@@ -224,11 +249,17 @@ try {
                 }
                 # Clear the dedicated sheet's old output before rebinding. Only the
                 # prevalidated chart formula is written. No broker/order calls.
-                $anchor.ClearContents() | Out-Null
+                $stage='chart_release'
+                Invoke-ExcelMutation $anchor 'ClearContents'
                 $sheetEnd=Get-ExcelProperty $ws 'Range' @('A1048576')
                 $bottom=Get-ExcelProperty (Get-ExcelProperty $sheetEnd 'End' @(-4162)) 'Row'
-                if($bottom -gt 2){(Get-ExcelProperty $ws 'Range' @("A3:G$bottom")).ClearContents() | Out-Null}
-                $anchor.Formula2=$wanted
+                if($bottom -gt 2){
+                    $stage='chart_clear_output'
+                    Invoke-ExcelMutation (Get-ExcelProperty $ws 'Range' @("A3:G$bottom")) 'ClearContents'
+                }
+                $stage='chart_subscribe'
+                Invoke-ExcelMutation $anchor 'Formula2' $wanted
+                if(-not (Test-Formula (Get-ExcelProperty $anchor 'Formula2') $wanted)){throw 'chart'}
                 $result[$i].chart_status='subscribing'
                 continue
             }

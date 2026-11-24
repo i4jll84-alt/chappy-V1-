@@ -68,3 +68,23 @@ def test_shared_data_preserves_broker_times_sides_missing_and_revisions(tmp_path
                 == 1
             )
             assert db.execute("SELECT count(*) FROM quotes").fetchone()[0] == 32
+
+
+def test_shared_export_keeps_empty_versions_and_quality_detection_times(tmp_path):
+    root = tmp_path / "data/rss-panel"
+    root.mkdir(parents=True)
+    payload = sample()
+    with closing(sqlite3.connect(root / "research.sqlite")) as db:
+        research_panel.initialize(db)
+        research_panel.save(db, CODES, payload, T, T)
+        payload["items"][0]["bars"][0][2:] = ["", "", "", "", 0]
+        research_panel.save(db, CODES, payload, T, T + timedelta(seconds=1))
+    with closing(sqlite3.connect(publish(tmp_path, T.date()))) as db:
+        assert db.execute(
+            "SELECT empty_source_id,priced_source_id,detected_source_id,known_at "
+            "FROM bar_quality_events"
+        ).fetchone() == (2, 1, 2, "2026-11-04T00:10:01.000000+00:00")
+        assert db.execute(
+            "SELECT source_id,o,volume FROM minute_bars WHERE symbol='7203' "
+            "AND bar_at='2026-11-04T00:09:00.000000+00:00' ORDER BY source_id"
+        ).fetchall() == [(1, 100, 500), (2, None, 0)]

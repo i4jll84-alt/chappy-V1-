@@ -118,7 +118,14 @@ def import_rakuten(src, dest, day):
             symbols = [i["symbol"] for i in payload["items"]]
             if not symbols or len(set(symbols)) != len(symbols):
                 raise ValueError("invalid_source_symbols")
-            save(buf, symbols, payload, datetime.fromisoformat(start), datetime.fromisoformat(end))
+            save(
+                buf,
+                symbols,
+                payload,
+                datetime.fromisoformat(start),
+                datetime.fromisoformat(end),
+                annotate_quality=False,
+            )
             frame = buf.execute("SELECT max(id) FROM frames").fetchone()[0]
             for sym, qstate, txt in buf.execute(
                 "SELECT symbol,quality,fields_json FROM quotes WHERE frame=?", (frame,)
@@ -189,6 +196,29 @@ def import_rakuten(src, dest, day):
                 )
             buf.execute("UPDATE frames SET raw_gzip=x'' WHERE id=?", (frame,))
             buf.commit()
+
+    # Quality detection is an observation of its own. Do not backdate detection
+    # when publishing an older day, and retain references to the original raw frames.
+    if src.execute("SELECT 1 FROM sqlite_master WHERE name='bar_quality_events'").fetchone():
+        for sym, at, empty, priced, detected, reason, known in src.execute(
+            "SELECT e.*,f.known_at FROM bar_quality_events e "
+            "JOIN frames f ON f.id=e.detected_frame "
+            "WHERE utc_time(f.known_at)>=? AND utc_time(f.known_at)<?",
+            day,
+        ):
+            dest.execute(
+                "INSERT INTO bar_quality_events VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    "rakuten",
+                    sym.removesuffix(".T"),
+                    utc(at),
+                    empty,
+                    priced,
+                    detected,
+                    reason,
+                    utc(known),
+                ),
+            )
 
 
 def import_kabu(src, dest, day):
@@ -288,6 +318,10 @@ def publish(project, day):
                 CREATE TABLE minute_bars(source TEXT,source_id INTEGER,symbol TEXT,known_at TEXT,
                   bar_at TEXT,elapsed_minute INTEGER,o REAL,h REAL,l REAL,c REAL,volume REAL,
                   PRIMARY KEY(source,source_id,symbol,bar_at));
+                CREATE TABLE bar_quality_events(
+                  source TEXT,symbol TEXT,bar_at TEXT,empty_source_id INTEGER,
+                  priced_source_id INTEGER,detected_source_id INTEGER,reason TEXT,known_at TEXT,
+                  PRIMARY KEY(source,symbol,bar_at,empty_source_id));
                 CREATE TABLE market_indexes(source TEXT,source_id INTEGER,code TEXT,known_at TEXT,
                   source_at TEXT,value REAL,source_quality TEXT,PRIMARY KEY(source,source_id,code));
                 CREATE TABLE capture_status(source TEXT,source_id INTEGER,known_at TEXT,state TEXT,

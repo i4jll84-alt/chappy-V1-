@@ -14,6 +14,11 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from trading_system.brokers.locking import single_writer
+from trading_system.research.bar_quality import (
+    initialize_quality,
+    record_empty_regression,
+    unresolved_counts,
+)
 from trading_system.research_workbook import chart_batches, validate_workbook
 from trading_system.rss_stop import can_start
 from trading_system.storage.store import atomic_write, canonical
@@ -169,8 +174,10 @@ def initialize(db):
             o REAL, h REAL, l REAL, c REAL, volume REAL, PRIMARY KEY(symbol,bar_time,frame));
     """)
 
+    initialize_quality(db)
 
-def save(db, symbols, data, start, end):
+
+def save(db, symbols, data, start, end, *, annotate_quality=True):
     items = data.get("items", [])
     if data.get("state") == "read" and (
         not isinstance(items, list)
@@ -195,6 +202,7 @@ def save(db, symbols, data, start, end):
         "valid_bars_seen": 0,
         "invalid_bars": 0,
         "empty_price_minutes": 0,
+        "suspect_empty_minutes": 0,
         "chart_symbols": 0,
         "current_day_chart_symbols": 0,
         "latest_chart_at": None,
@@ -286,15 +294,25 @@ def save(db, symbols, data, start, end):
                     continue
                 counts["empty_price_minutes" if values[1] is None else "valid_bars_seen"] += 1
                 old = db.execute(
-                    "SELECT elapsed_minute,o,h,l,c,volume FROM bars "
+                    "SELECT frame,elapsed_minute,o,h,l,c,volume FROM bars "
                     "WHERE symbol=? AND bar_time=? ORDER BY frame DESC LIMIT 1",
                     (symbol, key),
                 ).fetchone()
-                if old != values:
+                if old is None or old[1:] != values:
                     db.execute(
                         "INSERT INTO bars VALUES(?,?,?,?,?,?,?,?,?)", (frame, symbol, key, *values)
                     )
                     counts["bar_versions"] += 1
+                    version_frame = frame
+                else:
+                    version_frame = old[0]
+                if annotate_quality and values[1] is None:
+                    counts["suspect_empty_minutes"] += int(
+                        record_empty_regression(db, symbol, key, version_frame, frame)
+                    )
+    if annotate_quality:
+        unresolved, today = unresolved_counts(db, local_day)
+        counts.update(unresolved_empty_minutes=unresolved, unresolved_today_empty_minutes=today)
     if "chart_batch" in data:
         counts["day_symbols"] = day_symbols
     return {"state": state, "reason": data.get("reason"), **counts}

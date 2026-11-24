@@ -80,6 +80,43 @@ Assert-Failure {Read-Matrix $range 'Formula2' 32 11} 'excel_range_shape'
 $generic=Get-ReadFailure ([Exception]::new('private')) 'quotes' $null
 if ($generic.reason -ne 'excel_unavailable' -or $null -ne $generic.hresult) {throw 'generic'}
 
+# Rebinding failures used to bypass retry handling entirely.
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class MutationFixture {
+    public int Failures, Calls, Code = unchecked((int)0x80010001);
+    public string Data;
+    public void Check() {
+        Calls++;
+        if (Failures-- > 0) throw new COMException("sensitive", Code);
+    }
+    public void ClearContents() { Check(); Data = ""; }
+    public string Formula2 { get { return Data; } set { Check(); Data = value; } }
+}
+"@
+$mutation=[MutationFixture]::new()
+$retryLog.Clear();$retryState.delay_ms=0;$testSleeps.Clear()
+$stage='chart_release';$mutation.Failures=1
+Invoke-ExcelMutation $mutation 'ClearContents'
+if ($mutation.Calls -ne 2 -or $mutation.Data -cne '' -or
+    $retryLog[0].property -ne 'ClearContents' -or $retryState.delay_ms -ne 200) {
+    throw 'release retry'
+}
+$stage='chart_subscribe';$mutation.Failures=2;$mutation.Code=[int]0x8001010A
+Invoke-ExcelMutation $mutation 'Formula2' '=RssChart(A2:G2,"7203.T","1M",400)'
+if ($mutation.Calls -ne 5 -or $mutation.Data -cne '=RssChart(A2:G2,"7203.T","1M",400)' -or
+    $retryLog[2].stage -ne 'chart_subscribe' -or $retryState.delay_ms -ne 800) {
+    throw 'subscribe retry'
+}
+$mutation.Failures=99
+Assert-Failure {Invoke-ExcelMutation $mutation 'ClearContents'} 'excel_retry_later'
+if ($retryState.delay_ms -gt 1800 -or $mutation.Data -ceq '') {throw 'failed mutation changed data'}
+$retryLog.Clear();$retryState.delay_ms=0;$mutation.Code=[int]0x800A03EC
+Assert-Failure {Invoke-ExcelMutation $mutation 'Formula2' 'unused'} 'excel_unavailable'
+if ($retryLog.Count -or $retryState.delay_ms) {throw 'permanent mutation retried'}
+Assert-Failure {Invoke-ExcelMutation $mutation 'unexpected'} 'chart'
+
 # Status, header, date column and OHLCV share one Excel Value2 snapshot.
 $matrix=[Array]::CreateInstance([object], [int[]]@(7,7), [int[]]@(1,1))
 $f='=RssChart(A2:G2,"7203.T","1M",400)'

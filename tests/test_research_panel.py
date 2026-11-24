@@ -472,3 +472,71 @@ def test_database_busy_reason_is_distinct_from_other_storage_errors():
     busy.sqlite_errorcode = sqlite3.SQLITE_BUSY
     assert p.failure_reason(busy) == "capture_database_busy"
     assert p.failure_reason(sqlite3.IntegrityError("private details")) == "research_storage_error"
+
+
+def test_completed_trade_becoming_empty_is_flagged_without_replacing_raw():
+    from trading_system.research.bar_quality import EMPTY_REGRESSION
+
+    with sqlite3.connect(":memory:") as db:
+        p.initialize(db)
+        payload = sample()
+        p.save(db, CODES, payload, T, T)
+        before = db.execute("SELECT raw_gzip FROM frames WHERE id=1").fetchone()[0]
+        item = payload["items"][0]
+        item["bars"][0][2:] = ["", "", "", "", 0]
+        # A minute without any previous completed trade remains a legitimate empty observation.
+        item["bars"].append(["2026/11/04", "09:08", "", "", "", "", 0])
+        result = p.save(db, CODES, payload, T, T + timedelta(seconds=1))
+        assert result["suspect_empty_minutes"] == result["unresolved_empty_minutes"] == 1
+        assert result["unresolved_today_empty_minutes"] == 1
+        assert db.execute("SELECT * FROM bar_quality_events").fetchall() == [
+            (CODES[0], "2026-11-04T09:09:00+09:00", 2, 1, 2, EMPTY_REGRESSION)
+        ]
+        assert db.execute(
+            "SELECT frame,o,volume FROM bars WHERE symbol=? AND bar_time LIKE '%09:09:%' "
+            "ORDER BY frame",
+            (CODES[0],),
+        ).fetchall() == [(1, 100, 500), (2, None, 0)]
+        assert db.execute("SELECT raw_gzip FROM frames WHERE id=1").fetchone()[0] == before
+        repeated = p.save(db, CODES, payload, T, T + timedelta(seconds=2))
+        assert repeated["bar_versions"] == 0 and repeated["suspect_empty_minutes"] == 1
+        assert db.execute("SELECT count(*) FROM bar_quality_events").fetchone()[0] == 1
+        # A subsequent positive correction resolves the warning without erasing any version.
+        item["bars"][0][2:] = [100, 103, 99, 102, 550]
+        fixed = p.save(db, CODES, payload, T, T + timedelta(seconds=3))
+        assert fixed["unresolved_empty_minutes"] == 0
+        assert db.execute("SELECT count(*) FROM bar_quality_events").fetchone()[0] == 1
+
+
+def test_new_quality_detector_preserves_old_versions_and_records_actual_detection_time():
+    with sqlite3.connect(":memory:") as db:
+        p.initialize(db)
+        payload = sample()
+        p.save(db, CODES, payload, T, T, annotate_quality=False)
+        payload["items"][0]["bars"][0][2:] = ["", "", "", "", 0]
+        p.save(db, CODES, payload, T, T + timedelta(seconds=1), annotate_quality=False)
+        before = db.execute("SELECT * FROM bars ORDER BY frame,symbol,bar_time").fetchall()
+        later = T + timedelta(days=1)
+        result = p.save(db, CODES, payload, later, later)
+        assert result["unresolved_empty_minutes"] == 1
+        assert result["unresolved_today_empty_minutes"] == 0
+        assert db.execute(
+            "SELECT empty_frame,priced_frame,detected_frame FROM bar_quality_events"
+        ).fetchone() == (2, 1, 3)
+        # Only elapsed flags for yesterday's unfinished minute may change on the next day.
+        assert (
+            db.execute(
+                "SELECT * FROM bars WHERE frame<=2 ORDER BY frame,symbol,bar_time"
+            ).fetchall()
+            == before
+        )
+
+
+def test_incomplete_bar_then_empty_is_not_claimed_as_a_completed_trade_regression():
+    with sqlite3.connect(":memory:") as db:
+        p.initialize(db)
+        payload = sample()
+        p.save(db, CODES, payload, T, T)
+        payload["items"][0]["bars"][1][2:] = ["", "", "", "", 0]
+        result = p.save(db, CODES, payload, T, T + timedelta(minutes=1))
+        assert result["unresolved_empty_minutes"] == 0

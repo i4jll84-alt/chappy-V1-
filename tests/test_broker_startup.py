@@ -289,3 +289,22 @@ def test_vendor_probe_opens_only_absent_app(tmp_path, monkeypatch, source, key, 
         opening.assert_called_once_with(key, path)
     else:
         opening.assert_not_called()
+
+
+def test_empty_regression_status_does_not_claim_ready_or_no_trade():
+    for at in (T.replace(hour=8), T):
+        text = active_status(
+            "panel",
+            dict(
+                state="read",
+                updated_at=at.isoformat(),
+                target_symbols=61,
+                streaming_charts=61,
+                current_day_chart_symbols=61,
+                unresolved_empty_minutes=8,
+                unresolved_today_empty_minutes=3,
+            ),
+            at,
+        )
+        assert "本日3件／過去5件" in text and "無約定と扱わず" in text
+        assert "準備完了" not in text and "取得は継続中" in text

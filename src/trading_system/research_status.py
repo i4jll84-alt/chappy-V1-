@@ -61,6 +61,14 @@ def active_status(broker, data, now):
             )
         if (local - saved).total_seconds() > 90:
             return f"読取更新待ち（最終保存 {stamp}）。ExcelとRSSの接続を確認してください。"
+        unresolved = data.get("unresolved_empty_minutes", 0)
+        if unresolved:
+            today = data.get("unresolved_today_empty_minutes", 0)
+            return (
+                "分足の品質確認が必要（価格あり→空欄："
+                f"本日{today}件／過去{unresolved - today}件）。"
+                "原本保存・取得は継続中。無約定と扱わず、日足との照合が必要です。"
+            )
         if data.get("index_issue"):
             return f"株価を保存中。指数の読取は自動再試行中（最終保存 {stamp}）。"
         n = data.get("current_day_chart_symbols")
