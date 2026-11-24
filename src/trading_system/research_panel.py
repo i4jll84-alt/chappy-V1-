@@ -339,6 +339,10 @@ def run(
     def stopped():
         if (root / "STOP").exists():
             return "manual_stop"
+        from trading_system.capture_control import restart_requested
+
+        if restart_requested(root, requested, clock()):
+            return "health_restart"
         if not one_pass and clock() >= deadline:
             return "daytime_1600"
         return None

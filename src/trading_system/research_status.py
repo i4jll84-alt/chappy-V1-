@@ -132,6 +132,8 @@ def active_status(broker, data, now):
 
 
 def terminal_guidance(state, reason):
+    if reason == "health_restart":
+        return "定時確認による再起動待ちです。自動で取得を再確認します。"
     if reason == "capture_database_busy":
         return "保存DBが使用中です。外部操作を終え、取得を再開してください。"
     if reason == "daily_panel_missing":
