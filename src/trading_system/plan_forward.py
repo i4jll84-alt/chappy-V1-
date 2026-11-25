@@ -12,6 +12,7 @@ from time import monotonic
 from zoneinfo import ZoneInfo
 
 from trading_system.brokers.locking import single_writer
+from trading_system.plan_retirement import retire_previous_c
 from trading_system.storage.store import atomic_write, canonical
 
 JST = ZoneInfo("Asia/Tokyo")
@@ -20,6 +21,8 @@ STATUS_LABELS = {
     "waiting_signal": "引けの選定待ち",
     "waiting_calendar": "取引カレンダー待ち",
     "waiting_inputs": "株価・日証金データ待ち",
+    "pead_inputs": "PEADの価格・決算開示待ち",
+    "exits_only": "売却条件を確定・新規買付なし",
     "waiting_close_inputs": "評価用の日足待ち",
     "waiting_close": "翌取引日の評価待ち",
     "awaiting_native_decision": "A0-5の日次判定待ち",
@@ -86,6 +89,19 @@ def marked_plans(report):
         yield key, plan, positions, net
 
 
+def display_status(plan):
+    state = plan.get("status") or "未確認"
+    decision = plan.get("decision_status") or plan.get("decision_state")
+    if state == "waiting_close" and decision in ("missed_preopen", "stopped", "stopped_preopen"):
+        return decision
+    if plan.get("adapter") == "plan_c_pead_forward":
+        if state == "waiting_inputs":
+            return "pead_inputs"
+        if state in ("waiting_for_open", "waiting_close") and decision == "exits_only":
+            return "exits_only"
+    return state
+
+
 def publish_page(root, report):
     def yen(v):
         return "—" if v is None else f"{Decimal(str(v)):,.0f}円"
@@ -95,13 +111,7 @@ def publish_page(root, report):
 
     rows = []
     for key, plan, positions, net in marked_plans(report):
-        status = plan["status"]
-        if status == "waiting_close" and plan.get("decision_status") in (
-            "stopped",
-            "missed_preopen",
-            "stopped_preopen",
-        ):
-            status = plan["decision_status"]
+        status = display_status(plan)
         fields = (
             f"{key}　{plan['name']}",
             plan["start"],
@@ -156,9 +166,9 @@ def run_due(project, *, now=None, recovery_signal=None):
         return now + timedelta(seconds=monotonic() - started)
 
     root = project / "data/plan-forward"
-    plans = catalog(project)
     try:
         with single_writer(root):
+            plans = catalog(project)
             report = {"status": "ok", "checked_at": now.isoformat(), "plans": {}}
             for plan in plans:
                 if plan["stage"] == "research":
@@ -168,12 +178,13 @@ def run_due(project, *, now=None, recovery_signal=None):
                 book = root / "accounts" / key
                 row = {"name": plan["name"], **spec}
                 try:
+                    adapter = importlib.import_module(RESEARCH_PACKAGE + plan["adapter"])
+                    retire_previous_c(root, spec, current_time())
                     enrollment = book / "enrollment.json"
                     enrolled = enrollment.exists()
                     if enrolled:
                         if read(enrollment)["spec"] != spec:
                             raise ValueError("account_terms_changed")
-                    adapter = importlib.import_module(RESEARCH_PACKAGE + plan["adapter"])
                     options_for = getattr(adapter, "account_options", None)
                     options = options_for(plan) if options_for is not None else {}
                     if not enrolled:

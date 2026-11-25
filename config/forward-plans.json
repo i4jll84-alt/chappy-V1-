@@ -20,11 +20,11 @@
     },
     {
       "id": "C",
-      "name": "上昇トレンド内の押し目買い",
+      "name": "好決算ドリフト・3日初押し（4ATR・60立会日）",
       "stage": "active",
-      "adapter": "plan_c_forward",
-      "version": "c1-pullback-guarded-v1",
-      "start": "2026-11-24",
+      "adapter": "plan_c_pead_forward",
+      "version": "pead-dip3-atr4-h60-v1",
+      "start": "2026-11-25",
       "capital": 3000000
     },
     {

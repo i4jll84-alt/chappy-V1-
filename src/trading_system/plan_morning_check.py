@@ -169,6 +169,11 @@ def assess_plan(project, key, spec, signal, target, start, deadline, checked):
             )
         if key in ("A9", "A10") and doc.get("strategy") != spec["version"]:
             return apply_state(item, "unverified", "口座と保存判定のルール版が一致しない")
+        pead = key == "C" and spec.get("adapter") == "plan_c_pead_forward"
+        if pead and (
+            doc.get("version") != spec["version"] or doc.get("strategy") != "GRID_DIP_H60_ATR40"
+        ):
+            return apply_state(item, "unverified", "Cの確定記録と現在のPEADルール版が一致しない")
         item["decision_sha256"] = hashlib.sha256(canonical(doc).encode()).hexdigest()
         ds, dt = (
             (doc.get("signal_date"), doc.get("target"))
@@ -182,15 +187,17 @@ def assess_plan(project, key, spec, signal, target, start, deadline, checked):
             return apply_state(item, "stopped", "判定時の停止を記録")
         if state == "missed_preopen":
             return apply_state(item, "missed", "寄付前判定の欠測を記録")
-        if state not in ("ready", "blocked", "insufficient_data"):
+        if state not in ("ready", "blocked", "insufficient_data") and not (
+            pead and state == "exits_only"
+        ):
             return apply_state(item, "unverified", "確定状態が未確認")
         if state == "blocked":
             return apply_state(
                 item, "pending" if checked < deadline else "missed", "必要な入力が未確定"
             )
 
-        picks = doc[{"A": "picks", "B": "candidates", "C": "ranked"}[family]]
-        item["candidate_count"] = len(picks)
+        picks = doc["picks" if pead else {"A": "picks", "B": "candidates", "C": "ranked"}[family]]
+        item["candidate_count"] = len(doc.get("ranked", picks) if pead else picks)
         if key == "B":
             item["order_count"] = len(doc["orders"])
         elif key == "C":
@@ -218,6 +225,10 @@ def assess_plan(project, key, spec, signal, target, start, deadline, checked):
             return apply_state(item, "missed", "確定完了が09:00以降")
         if key == "C" and state == "insufficient_data":
             return apply_state(item, "guarded", "資料不足による判定不可。既存建玉の出口は継続")
+        if pead and not doc["allow_entries"]:
+            if item["order_count"]:
+                return apply_state(item, "unverified", "新規停止の判定に買付予定が含まれています")
+            return apply_state(item, "guarded", "対象寄付の新規買付はPEADの条件により停止")
         if timed < start:
             return apply_state(item, "preexisting", "朝の初回起動より前に確定済み")
         if cutoff is None:

@@ -6,7 +6,7 @@ from datetime import date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
 
-from trading_system.plan_forward import STATUS_LABELS
+from trading_system.plan_forward import STATUS_LABELS, display_status
 from trading_system.plan_holdings import HoldingsReader, ordered_accounts, positive
 from trading_system.plan_performance import PROFIT_COLOURS, performance, profit_display, profit_tag
 from trading_system.plan_schedule import EVENING_CHECK
@@ -122,10 +122,8 @@ def share_price(value):
 
 
 def account_line(plan):
-    state = plan.get("status") or "未確認"
+    state = display_status(plan)
     decision = plan.get("decision_status") or plan.get("decision_state")
-    if state == "waiting_close" and decision in ("missed_preopen", "stopped", "stopped_preopen"):
-        state = decision
     label = STATUS_LABELS.get(state, state)
     if state == "waiting_close" and decision == "ready":
         label = "寄付候補確定" if plan.get("picks") else "判定済・候補0"
