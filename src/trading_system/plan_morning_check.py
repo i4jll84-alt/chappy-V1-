@@ -1,4 +1,4 @@
-"""Measure morning-only readiness from frozen A/B decisions and their actual input receipts."""
+"""Measure morning readiness from each account's frozen decision and input receipts."""
 
 import argparse
 import hashlib
@@ -49,7 +49,7 @@ def apply_state(item, state, reason):
 
 
 def official(project, key, signal, target, spec):
-    if key in ("A", "C"):
+    if key in ("A", "A9", "A10", "C"):
         path = project / "data/plan-forward/accounts" / key / "sessions" / target / "decision.json"
         return read(path) if path.is_file() else None
     capital = spec["capital"]
@@ -162,17 +162,20 @@ def assess_plan(project, key, spec, signal, target, start, deadline, checked):
         return apply_state(item, "outside", "比較対象の開始前または非稼働")
     try:
         doc = official(project, key, signal, target, spec)
+        family = "A" if key in ("A9", "A10") else key
         if doc is None:
             return apply_state(
                 item, "pending" if checked < deadline else "missed", "対象日の確定記録なし"
             )
+        if key in ("A9", "A10") and doc.get("strategy") != spec["version"]:
+            return apply_state(item, "unverified", "口座と保存判定のルール版が一致しない")
         item["decision_sha256"] = hashlib.sha256(canonical(doc).encode()).hexdigest()
         ds, dt = (
             (doc.get("signal_date"), doc.get("target"))
-            if key in ("A", "C")
+            if family in ("A", "C")
             else (doc.get("date"), doc.get("order_date"))
         )
-        state = doc.get("status" if key == "A" else "state")
+        state = doc.get("status" if family == "A" else "state")
         if ds != signal or (dt != target and not (dt is None and state == "blocked")):
             return apply_state(item, "unverified", "選定日・対象寄付日が一致しない")
         if state in ("disabled", "stopped"):
@@ -186,7 +189,7 @@ def assess_plan(project, key, spec, signal, target, start, deadline, checked):
                 item, "pending" if checked < deadline else "missed", "必要な入力が未確定"
             )
 
-        picks = doc[{"A": "picks", "B": "candidates", "C": "ranked"}[key]]
+        picks = doc[{"A": "picks", "B": "candidates", "C": "ranked"}[family]]
         item["candidate_count"] = len(picks)
         if key == "B":
             item["order_count"] = len(doc["orders"])
@@ -224,7 +227,7 @@ def assess_plan(project, key, spec, signal, target, start, deadline, checked):
         if key == "C":
             # The C receipts cover a longer historical window than the A/B morning audit.
             return apply_state(item, "verified_cutoff", "保存された締切時点の資料から寄付前に確定")
-        return apply_state(item, *source_timing(project, key, doc, signal, start, cutoff))
+        return apply_state(item, *source_timing(project, family, doc, signal, start, cutoff))
     except (
         OSError,
         ValueError,
@@ -276,8 +279,10 @@ def record_startup(project, report, *, now=None):
         k: assess_plan(project, k, specs.get(k), signal, target, start, deadline, checked)
         for k in ("A", "B")
     }
-    if specs.get("C", {}).get("stage") == "active" and signal >= specs["C"]["start"]:
-        rows["C"] = assess_plan(project, "C", specs["C"], signal, target, start, deadline, checked)
+    for key in ("C", "A9", "A10"):
+        spec = specs.get(key)
+        if spec and spec["stage"] == "active" and signal >= spec["start"]:
+            rows[key] = assess_plan(project, key, spec, signal, target, start, deadline, checked)
     b_account = project / "data/a0-5-paper/accounts" / str(specs.get("B", {}).get("capital", 0))
     switches = {
         "C": (project / "data/plan-forward/accounts/C/STOP").exists()
@@ -285,12 +290,6 @@ def record_startup(project, report, *, now=None):
         or (
             project / "data/plan-forward/accounts/C/sessions" / target / "preopen_stop.json"
         ).exists(),
-        "A": (
-            (project / "data/plan-forward/accounts/A/STOP").exists()
-            or (
-                project / "data/plan-forward/accounts/A/sessions" / target / "preopen_stop.json"
-            ).exists()
-        ),
         "B": (
             (project / "data/a0-5-paper/STOP").exists()
             or (project / "data/a0-5-paper/stops" / (target + ".json")).exists()
@@ -298,6 +297,11 @@ def record_startup(project, report, *, now=None):
             or not (project / "data/a0-5-paper/enabled").is_file()
         ),
     }
+    for key in ("A", "A9", "A10"):
+        account = project / "data/plan-forward/accounts" / key
+        switches[key] = (account / "STOP").exists() or (
+            account / "sessions" / target / "preopen_stop.json"
+        ).exists()
     for key, item in rows.items():
         if item["state"] != "outside" and (
             switches[key] or (key != "C" and (project / "data/swing-forward/STOP").exists())
@@ -321,10 +325,10 @@ def record_startup(project, report, *, now=None):
         )
         if s in states
     )
-    if previous.get("state") in ("met", "prior_inputs", "preexisting", "evening_run") and grade in (
-        "pending",
-        "unverified",
-        "missed",
+    if (
+        previous.get("state") in ("met", "prior_inputs", "preexisting", "evening_run")
+        and previous.get("plans", {}).keys() == rows.keys()
+        and grade in ("pending", "unverified", "missed")
     ):
         return previous
     base.update(started_at=start.isoformat(), deadline=deadline.isoformat(), plans=rows)

@@ -274,7 +274,7 @@ def test_two_morning_only_starts_settle_prior_fills_and_freeze_next_candidates(
     a_book = tmp_path / "A"
     next_session = "2026-11-24"  # After a weekend and an exchange holiday.
     sessions = {SIGNAL: (TARGET, "2026-12-01", []), TARGET: (next_session, "2026-12-02", [])}
-    monkeypatch.setattr(a, "schedule", lambda project, signal, now: sessions[signal])
+    monkeypatch.setattr(a, "schedule", lambda project, signal, now, term: sessions[signal])
     source_times = []
 
     def a_screen(project, signal, target, due, cutoff):

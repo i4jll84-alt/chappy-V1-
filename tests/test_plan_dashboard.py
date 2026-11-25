@@ -417,6 +417,40 @@ def test_pending_at_open_becomes_unconfirmed_until_final_receipt_arrives():
     assert "期限経過" not in dashboard.morning_evidence(view.morning, day, None, True)
 
 
+def test_fixed_term_accounts_show_distinct_balances_and_morning_evidence(tmp_path):
+    root = tmp_path / "data/plan-forward"
+    day = datetime.now(dashboard.JST).date().isoformat()
+    plan = dict(capital=3_000_000, nav=3_000_000, positions={})
+    plans = {"A": plan, "B": dict(plan, positions=0), "C": plan}
+    save(root / "summary.json", {"plans": plans})
+    window = create_window(tk)
+    window.withdraw()
+    try:
+        notebook = ttk.Notebook(window)
+        view = dashboard.PlanDashboard(notebook, tmp_path, lambda _: False)
+        window.update_idletasks()
+        plans.update(
+            A10=dict(plan, adapter="plan_a_forward", nav=3_100_000),
+            A9=dict(plan, adapter="plan_a_forward", nav=2_990_000),
+        )
+        save(root / "summary.json", {"plans": plans})
+        save(
+            root / "morning-check" / (day + ".json"),
+            {"target": day, "plans": {"A10": {"candidate_count": 2}, "A9": {"candidate_count": 1}}},
+        )
+        view.refresh()
+        assert view.accounts.get_children() == ("A", "A9", "A10", "B", "C")
+        assert view.accounts.set("A9", "plan") == "A9（9日固定）"
+        assert view.accounts.set("A10", "plan") == "A10（10日固定）"
+        assert view.accounts.set("A9", "nav") == "2,990,000円"
+        assert view.accounts.set("A10", "nav") == "3,100,000円"
+        nine, ten = view.plan_proof.get().splitlines()
+        assert nine.startswith("A9　") and "候補 1銘柄" in nine
+        assert ten.startswith("A10　") and "候補 2銘柄" in ten
+    finally:
+        window.destroy()
+
+
 def test_holdings_tab_updates_prices_without_changing_account_snapshot(tmp_path, monkeypatch):
     window = create_window(tk)
     window.withdraw()

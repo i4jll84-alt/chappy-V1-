@@ -1,4 +1,4 @@
-"""Read-only holdings display from A/B account snapshots and verified saved daily prices."""
+"""Read-only paper holdings from account snapshots and verified saved daily prices."""
 
 import json
 import sqlite3
@@ -14,6 +14,11 @@ from trading_system.plan_performance import performance
 from trading_system.research.daytrade_universe import dated_inputs
 
 JST = ZoneInfo("Asia/Tokyo")
+DISPLAY_ORDER = ("A", "A9", "A10", "B", "C")
+
+
+def ordered_accounts(plans):
+    return [k for k in DISPLAY_ORDER if k in plans] + [k for k in plans if k not in DISPLAY_ORDER]
 
 
 def positive(value):
@@ -79,7 +84,7 @@ def positions(project, key, plan):
             )
             for code, pos in sorted(plan["positions"].items())
         ]
-    if key == "A":
+    if key == "A" or plan.get("adapter") == "plan_a_forward":
         held = plan.get("positions")
         if not isinstance(held, dict):
             raise ValueError("A holdings unavailable")
@@ -159,7 +164,7 @@ def positions(project, key, plan):
 
 def holdings_snapshot(project, plans, now):
     rows, statuses = [], []
-    for key in ("A", "B", *(["C"] if "C" in plans else [])):
+    for key in ordered_accounts(dict.fromkeys(("A", "B", *plans))):
         if key not in plans:
             statuses.append(f"{key}：口座記録待ち")
             continue

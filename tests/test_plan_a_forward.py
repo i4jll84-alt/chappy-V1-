@@ -35,7 +35,7 @@ def test_retry_freeze_and_late_quote_are_idempotent(tmp_path, monkeypatch):
     monkeypatch.setattr(
         plan,
         "schedule",
-        lambda project, d, now: {
+        lambda project, d, now, term: {
             start: ("2026-11-20", "2026-12-01", []),
             "2026-11-20": ("2026-11-24", "2026-12-02", []),
         }[d],
@@ -164,7 +164,7 @@ def test_frozen_candidates_respect_only_a_witnessed_preopen_stop(
     book = tmp_path / "account"
     start, target = "2026-11-19", "2026-11-20"
 
-    def calendar(project, day, now):
+    def calendar(project, day, now, term):
         return {start: (target, "2026-12-01", []), target: ("2026-11-24", "2026-12-02", [])}[day]
 
     monkeypatch.setattr(plan, "schedule", calendar)

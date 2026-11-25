@@ -212,12 +212,19 @@ def test_real_hidden_tk_prompt_closes_and_releases_lock(
         pass
 
 
-@pytest.mark.parametrize("script", ["init.tcl", "tk.tcl"])
-def test_prompt_recovers_from_transient_library_read(monkeypatch, script):
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Can't find a usable init.tcl",
+        "Can't find a usable tk.tcl",
+        'invalid command name "tcl_findLibrary"',
+    ],
+)
+def test_prompt_recovers_from_transient_library_read(monkeypatch, message):
     import tkinter as tk
 
     window = object()
-    create = Mock(side_effect=[tk.TclError(f"Can't find a usable {script}"), window])
+    create = Mock(side_effect=[tk.TclError(message), window])
     monkeypatch.setattr(tk, "Tk", create)
     delay = Mock()
     monkeypatch.setattr(tk_startup, "sleep", delay)

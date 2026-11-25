@@ -1,4 +1,4 @@
-"""Read-only A/B paper account dashboard and a background launcher for catch-up."""
+"""Read-only paper account dashboard and a background launcher for catch-up."""
 
 import json
 import subprocess
@@ -7,12 +7,13 @@ from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
 
 from trading_system.plan_forward import STATUS_LABELS
-from trading_system.plan_holdings import HoldingsReader, positive
+from trading_system.plan_holdings import HoldingsReader, ordered_accounts, positive
 from trading_system.plan_performance import PROFIT_COLOURS, performance, profit_display, profit_tag
 from trading_system.plan_schedule import EVENING_CHECK
 
 JST = ZoneInfo("Asia/Tokyo")
 PREOPEN_CHECK = time(7, 40)
+ACCOUNT_LABELS = {"A9": "A9（9日固定）", "A10": "A10（10日固定）"}
 STEP_LABELS = {
     "daily": "日足・銘柄情報",
     "jsf": "日証金",
@@ -220,7 +221,7 @@ def morning_evidence(report, day, issue, expired=False):
         return f"対象寄付日 {day}　　{issue}"
     title = morning_text(report.get("label")) or "判定状態を確認してください"
     if expired and report.get("state") == "pending":
-        title = "期限経過・寄付前の両プラン確定を確認できません"
+        title = "期限経過・寄付前に全口座の確定を確認できません"
     return (
         f"{title}　　対象寄付日 {day}　　選定日 {report.get('signal_date') or '—'}\n"
         f"朝の開始 {check_time(report, 'started_at', day)}　　"
@@ -315,8 +316,17 @@ class PlanDashboard:
         self.morning = {}
         self.notebook = notebook
 
-        self.frame = tab = ttk.Frame(notebook, padding=(20, 12))
-        notebook.add(tab, text="各プランの稼働状況")
+        status_tab = ttk.Frame(notebook)
+        notebook.add(status_tab, text="各プランの稼働状況")
+        canvas = tk.Canvas(status_tab, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(status_tab, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        self.frame = tab = ttk.Frame(canvas, padding=(20, 12))
+        content = canvas.create_window(0, 0, window=tab, anchor="nw")
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(content, width=e.width))
+        tab.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
         heading = ttk.Frame(tab)
         heading.pack(fill="x")
         ttk.Label(heading, text="フォワードテスト", style="Title.TLabel").pack(side="left")
@@ -341,7 +351,7 @@ class PlanDashboard:
         self.accounts = self.table(
             tab,
             [
-                ("plan", "口座", 70),
+                ("plan", "口座", 126),
                 ("state", "判定・処理状態", 170),
                 ("nav", "純資産", 100),
                 ("net", "評価損益・率", 205),
@@ -352,6 +362,7 @@ class PlanDashboard:
             height=2,
         )
         self.profit_colours(self.accounts)
+        self.accounts.column("plan", minwidth=113)
         self.accounts.column("net", minwidth=175)
         self.account_field = "plan"
         for key in self.accounts["columns"]:
@@ -699,7 +710,11 @@ class PlanDashboard:
         self.morning = proof
         self.morning_label.set(morning_evidence(proof, day, proof_issue, expired))
         self.plan_proof.set(
-            "\n".join(line for k in ("A", "B", "C") if (line := plan_evidence(proof, k, expired)))
+            "\n".join(
+                line
+                for k in ordered_accounts(proof.get("plans", {}))
+                if (line := plan_evidence(proof, k, expired))
+            )
         )
         self.checked.set(
             "ペーパー口座　　最終確認 " + (summary_issue or clock_label(summary.get("checked_at")))
@@ -713,14 +728,17 @@ class PlanDashboard:
         for key in self.accounts.get_children():
             if key not in self.plans:
                 self.accounts.delete(key)
-        for key, p in self.plans.items():
-            row = (key + "プラン", *account_line(p))
+        for index, key in enumerate(ordered_accounts(self.plans)):
+            p = self.plans[key]
+            row = (ACCOUNT_LABELS.get(key, key + "プラン"), *account_line(p))
             net, _ = performance(p.get("nav"), p.get("capital"))
             tags = (profit_tag(net),)
             if self.accounts.exists(key):
                 self.accounts.item(key, values=row, tags=tags)
+                self.accounts.move(key, "", index)
             else:
-                self.accounts.insert("", "end", iid=key, values=row, tags=tags)
+                self.accounts.insert("", index, iid=key, values=row, tags=tags)
+        self.accounts.configure(height=min(5, max(2, len(self.plans))))
         if not self.accounts.selection() and self.accounts.get_children():
             self.accounts.selection_set(self.accounts.get_children()[0])
         self.show_account()

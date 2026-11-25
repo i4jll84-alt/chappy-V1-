@@ -169,12 +169,15 @@ def run_due(project, *, now=None, recovery_signal=None):
                 row = {"name": plan["name"], **spec}
                 try:
                     enrollment = book / "enrollment.json"
-                    if enrollment.exists():
+                    enrolled = enrollment.exists()
+                    if enrolled:
                         if read(enrollment)["spec"] != spec:
                             raise ValueError("account_terms_changed")
-                    else:
-                        save(enrollment, {"spec": spec, "registered_at": now.isoformat()})
                     adapter = importlib.import_module(RESEARCH_PACKAGE + plan["adapter"])
+                    options_for = getattr(adapter, "account_options", None)
+                    options = options_for(plan) if options_for is not None else {}
+                    if not enrolled:
+                        save(enrollment, {"spec": spec, "registered_at": now.isoformat()})
                     recover_plan = getattr(adapter, "recover_morning", None)
                     current = current_time()
                     if (
@@ -190,6 +193,7 @@ def run_due(project, *, now=None, recovery_signal=None):
                                 start=plan["start"],
                                 capital=plan["capital"],
                                 now=current,
+                                **options,
                             )
                         except Exception as exc:
                             row["morning_recovery"] = {
@@ -202,6 +206,7 @@ def run_due(project, *, now=None, recovery_signal=None):
                         start=plan["start"],
                         capital=plan["capital"],
                         now=current_time(),
+                        **options,
                     )
                     if (
                         not snapshot.get("status")
@@ -214,7 +219,12 @@ def run_due(project, *, now=None, recovery_signal=None):
                 except Exception as exc:
                     reason = (
                         str(exc)
-                        if str(exc) in ("account_terms_changed", "invalid_account_summary")
+                        if str(exc)
+                        in (
+                            "account_terms_changed",
+                            "invalid_account_summary",
+                            "plan_a_version_mismatch",
+                        )
                         else type(exc).__name__
                     )
                     row = {"name": plan["name"], **spec, "status": "error", "issue": reason}

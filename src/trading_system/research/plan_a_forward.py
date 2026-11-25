@@ -19,6 +19,21 @@ OPEN = time(9)
 CLOSE = time(15, 30)
 INPUT_ERRORS = (FileNotFoundError, ValueError, sqlite3.Error, duckdb.Error)
 STRATEGY = "swing_s3_jsf_uncapped_morning_v1"
+FIXED_TERMS = {
+    "A": ("s3-jsf-morning-v1", 6),
+    "A9": ("s3-jsf-morning-fixed9-v1", 9),
+    "A10": ("s3-jsf-morning-fixed10-v1", 10),
+}
+STRATEGY_BY_TERM = {
+    term: STRATEGY if key == "A" else version for key, (version, term) in FIXED_TERMS.items()
+}
+
+
+def account_options(plan):
+    version, term = FIXED_TERMS[plan["id"]]
+    if version != plan["version"]:
+        raise ValueError("plan_a_version_mismatch")
+    return {"term": term}
 
 
 @lru_cache(maxsize=2)
@@ -36,11 +51,11 @@ def serial(value):
     return json.loads(json.dumps(value, default=str, allow_nan=False))
 
 
-def initial(start, capital):
+def initial(start, capital, *, strategy=STRATEGY):
     if type(capital) is not int or capital <= 0:
         raise ValueError("initial_capital_must_be_a_positive_integer")
     return {
-        "strategy": STRATEGY,
+        "strategy": strategy,
         "start": start,
         "initial_capital": str(capital),
         "cash": str(capital),
@@ -55,16 +70,23 @@ def initial(start, capital):
     }
 
 
-def schedule(project, signal, now):
+def schedule(project, signal, now, term=6):
     first = date.fromisoformat(signal)
-    days, refs = calendar_days(project / "data/jquants", first, now)
+    root = project / "data/jquants"
+    # The longer fixed deadlines can span more than 20 calendar days around exchange holidays.
+    days, refs = (
+        calendar_days(root, first, now, future_days=35)
+        if term > 6
+        else calendar_days(root, first, now)
+    )
     trading = sorted(d for d, flag in days.items() if d >= signal and flag in ("1", "2"))
-    if len(trading) < 8 or trading[0] != signal:
+    expiry = term + 1
+    if len(trading) <= expiry or trading[0] != signal:
         raise ValueError("signal_or_future_calendar_unavailable")
-    span = (date.fromisoformat(trading[7]) - first).days
+    span = (date.fromisoformat(trading[expiry]) - first).days
     if any((first + timedelta(days=i)).isoformat() not in days for i in range(span + 1)):
         raise ValueError("incomplete_future_calendar")
-    return trading[1], trading[7], refs
+    return trading[1], trading[expiry], refs
 
 
 def prepare(project, signal_date, target, due, cutoff):
@@ -132,6 +154,57 @@ def preopen_stop(project, book, folder, decision, deadline, stamp):
     )
     swing.write(path, notice)
     return notice
+
+
+def frozen_selection(book, signal, target, due, now, deadline):
+    """Use already recorded candidate inputs, never another account's capital, stop or sell date."""
+    signal_close = datetime.combine(date.fromisoformat(signal), CLOSE, JST)
+    for key, (_, term) in FIXED_TERMS.items():
+        peer = book.parent / key
+        path = peer / "sessions" / target / "decision.json"
+        if peer == book or not path.is_file():
+            continue
+        try:
+            source = swing.read(path)
+            if (
+                source["strategy"] != STRATEGY_BY_TERM[term]
+                or source["status"] != "ready"
+                or (source["signal_date"], source["target"]) != (signal, target)
+                or not all(
+                    isinstance(source[f], list)
+                    for f in ("picks", "price_and_master_sources", "jsf_sources")
+                )
+            ):
+                continue
+            cutoff, recorded = (
+                datetime.fromisoformat(source[k]) for k in ("cutoff", "recorded_at")
+            )
+            if not signal_close <= cutoff <= recorded <= now or recorded >= deadline:
+                continue
+        except (KeyError, OSError, TypeError, ValueError):
+            # A peer ledger is optional; this account can still verify its own source inputs.
+            continue
+        selected = {
+            field: source[field]
+            for field in (
+                "signal_date",
+                "target",
+                "status",
+                "cutoff",
+                "picks",
+                "price_and_master_sources",
+                "jsf_sources",
+                "decision_origin",
+                "original_cutoff",
+            )
+            if field in source
+        }
+        return dict(
+            selected,
+            due=due,
+            selection_source={"account": key, "decision_sha256": swing.signature(source)},
+        )
+    return None
 
 
 def settle(project, previous, decision, asof, stop_notice=None):
@@ -202,7 +275,7 @@ def settle(project, previous, decision, asof, stop_notice=None):
     )
 
 
-def advance(project: Path, book: Path, *, start: str, capital: int, now: datetime) -> dict:
+def advance(project: Path, book: Path, *, start: str, capital: int, now: datetime, term=6) -> dict:
     """Advance one exclusively locked book. A session's frozen signal and close are write-once."""
     if now.tzinfo is None:
         raise ValueError("timezone_required")
@@ -212,7 +285,8 @@ def advance(project: Path, book: Path, *, start: str, capital: int, now: datetim
     def stamp():
         return now + timedelta(seconds=monotonic() - before)
 
-    seed = initial(start, capital)
+    strategy = STRATEGY_BY_TERM[term]
+    seed = initial(start, capital, strategy=strategy)
     path = book / "initial.json"
     if path.exists():
         if swing.read(path) != seed:
@@ -229,7 +303,7 @@ def advance(project: Path, book: Path, *, start: str, capital: int, now: datetim
             state["last_mark"] != marks[-1].parent.name
             or state["initial_capital"] != str(capital)
             or state["start"] != start
-            or state["strategy"] != STRATEGY
+            or state["strategy"] != strategy
         ):
             raise ValueError("invalid_last_close")
         prior = swing.read(marks[-1].with_name("decision.json"))
@@ -259,7 +333,7 @@ def advance(project: Path, book: Path, *, start: str, capital: int, now: datetim
 
     while True:
         try:
-            target, due, calendar_refs = schedule(project, signal, stamp())
+            target, due, calendar_refs = schedule(project, signal, stamp(), term)
         except INPUT_ERRORS as exc:
             return status("waiting_calendar", issue=str(exc))
         folder = book / "sessions" / target
@@ -277,7 +351,7 @@ def advance(project: Path, book: Path, *, start: str, capital: int, now: datetim
                 decision["target"],
                 decision["due"],
                 decision["strategy"],
-            ) != (signal, target, due, STRATEGY):
+            ) != (signal, target, due, strategy):
                 raise ValueError("frozen_signal_calendar_conflict")
         else:
             failure = None
@@ -288,7 +362,6 @@ def advance(project: Path, book: Path, *, start: str, capital: int, now: datetim
                 )
                 if (book / "STOP").exists() or (project / "data/swing-forward/STOP").exists():
                     decision = dict(
-                        strategy=STRATEGY,
                         status="stopped",
                         signal_date=signal,
                         target=target,
@@ -297,6 +370,8 @@ def advance(project: Path, book: Path, *, start: str, capital: int, now: datetim
                         cutoff=cutoff.isoformat(),
                     )
                 else:
+                    decision = frozen_selection(book, signal, target, due, current, deadline)
+                if decision is None:
                     try:
                         decision = prepare(project, signal, target, due, cutoff)
                         decision["decision_origin"] = "evening_inputs"
@@ -316,7 +391,6 @@ def advance(project: Path, book: Path, *, start: str, capital: int, now: datetim
             if frozen_at >= deadline:
                 # A late runner may manage existing holdings, but never selects retrospective buys.
                 decision = dict(
-                    strategy=STRATEGY,
                     status="missed_preopen",
                     signal_date=signal,
                     target=target,
@@ -324,7 +398,11 @@ def advance(project: Path, book: Path, *, start: str, capital: int, now: datetim
                     picks=[],
                     issue=failure,
                 )
-            decision.update(recorded_at=frozen_at.isoformat(), calendar_sources=calendar_refs)
+            decision.update(
+                strategy=strategy,
+                recorded_at=frozen_at.isoformat(),
+                calendar_sources=calendar_refs,
+            )
             swing.write(path, decision)
         last_decision = signal
         notice = preopen_stop(project, book, folder, decision, deadline, stamp)

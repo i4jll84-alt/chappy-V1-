@@ -26,6 +26,24 @@
       "version": "c1-pullback-guarded-v1",
       "start": "2026-11-24",
       "capital": 3000000
+    },
+    {
+      "id": "A9",
+      "name": "プランA・9営業日固定",
+      "stage": "active",
+      "adapter": "plan_a_forward",
+      "version": "s3-jsf-morning-fixed9-v1",
+      "start": "2026-11-25",
+      "capital": 3000000
+    },
+    {
+      "id": "A10",
+      "name": "プランA・10営業日固定",
+      "stage": "active",
+      "adapter": "plan_a_forward",
+      "version": "s3-jsf-morning-fixed10-v1",
+      "start": "2026-11-25",
+      "capital": 3000000
     }
   ]
 }

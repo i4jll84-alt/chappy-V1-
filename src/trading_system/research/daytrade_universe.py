@@ -73,7 +73,7 @@ def panel_location(root, day):
     return root
 
 
-def calendar_days(root, day, asof):
+def calendar_days(root, day, asof, *, future_days=20):
     archive = root / "history"
     path = (archive / "history.sqlite").resolve()
     if (archive / "history.sqlite-wal").exists() and (
@@ -82,7 +82,7 @@ def calendar_days(root, day, asof):
         raise ValueError("calendar_archive_busy")
     evidence = []
     lo = day - timedelta(days=30)
-    hi = day + timedelta(days=20)
+    hi = day + timedelta(days=future_days)
     days = {}
     with closing(sqlite3.connect(path.as_uri() + "?mode=ro&immutable=1", uri=True)) as db:
         for r in history_rows(

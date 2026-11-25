@@ -166,6 +166,21 @@ def test_cache_refreshes_on_saved_price_poll_or_account_change(tmp_path, monkeyp
     assert load.call_count == 3
 
 
+def test_fixed_term_holdings_use_each_accounts_cost_and_shares(tmp_path, monkeypatch):
+    receipt(tmp_path, "2026-11-20")
+    read_prices = market(monkeypatch)
+    nine = dict(a_plan(), adapter="plan_a_forward")
+    ten = dict(a_plan(), adapter="plan_a_forward")
+    ten["positions"]["12340"].update(shares="100", debit="54000")
+    result = h.holdings_snapshot(tmp_path, {"A10": ten, "A": {"positions": {}}, "A9": nine}, now())
+    assert [(r["plan"], r["shares"], r["net"]) for r in result["rows"]] == [
+        ("A9", Decimal(200), Decimal(10040)),
+        ("A10", Decimal(100), Decimal(1050)),
+    ]
+    assert "A：保有0銘柄" in result["status"]
+    read_prices.assert_called_once()
+
+
 @pytest.mark.parametrize("missing", ["debit", "shares", "mark", "older_mark", "future_mark"])
 def test_holdings_profit_needs_verified_cost_and_matching_share_price_dates(
     tmp_path, monkeypatch, missing

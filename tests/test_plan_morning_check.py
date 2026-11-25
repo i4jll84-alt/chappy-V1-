@@ -214,6 +214,40 @@ def test_provenance_and_deadlines(tmp_path, sample, case, state):
         assert result["plans"]["B"]["decision_at"] is None
 
 
+def test_fixed_a_accounts_verify_own_decision_stop_and_start_date(tmp_path, sample):
+    path, a, b = sample
+    cfg = tmp_path / "config/forward-plans.json"
+    catalog = json.loads(cfg.read_bytes())
+    for term in (9, 10):
+        catalog["plans"].append(
+            dict(
+                id=f"A{term}", version=f"fixed{term}", start=SIGNAL, stage="active", capital=CAPITAL
+            )
+        )
+    put(cfg, catalog)
+    put(path, a)
+    save_b(tmp_path, b)
+    books = tmp_path / "data/plan-forward/accounts"
+
+    def decision(key):
+        return books / key / "sessions" / TARGET / "decision.json"
+
+    put(decision("A9"), dict(a, strategy="fixed9", picks=[{"code": "12340"}]))
+    proof = run(tmp_path)["plans"]
+    assert (proof["A9"]["state"], proof["A9"]["candidate_count"]) == ("met", 1)
+    assert proof["A10"]["state"] == "pending"
+    put(decision("A10"), dict(a, strategy="fixed9"))
+    assert run(tmp_path)["plans"]["A10"]["state"] == "unverified"
+    put(decision("A10"), dict(a, strategy="fixed10"))
+    (books / "A9" / "STOP").touch()
+    proof = run(tmp_path)["plans"]
+    assert proof["A9"]["state"] == "stopped"
+    assert proof["A10"]["state"] == proof["A"]["state"] == "met"
+    catalog["plans"][-1]["start"] = TARGET
+    put(cfg, catalog)
+    assert "A10" not in run(tmp_path)["plans"]
+
+
 def test_different_session_and_before_plan_start(tmp_path, sample):
     prior = run(tmp_path, signal="2026-11-18", target=SIGNAL)
     assert prior["state"] == "outside"
