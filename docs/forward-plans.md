@@ -121,3 +121,8 @@ V1の追加市場キャッシュは `data/plan_c_pead_v1/jquants/`。検証の4A
 scripts/register_daytrade_universe.ps1 は、Windowsタスク JPX-DaytradeUniverse-AfterClose を平日22:00（Asia/Tokyo）で登録する。実行先はプロジェクトのPythonによる trading_system.plan_forward --scheduled-close。22時以降は共通の夜間処理、翌朝など22時前の遅延配信は --catch-up と同じ復旧処理を使い、土日はWindows予約から新たな取得を開始しない。既存の単独日足ジョブからの移行を受け付け、実行を逃した場合の補完と失敗時の再試行設定を保持する。
 
 夜間処理は日足・日証金・決算予定・信用残高等を確認し、A・Bの処理後に研究用パネル・関連公表資料を確認する。朝の補完でも前夜22時より古い決算予定・公表資料を夜間取得済みとは扱わない。取得・完了時刻は実際の時刻を残す。09:00を過ぎて新たな寄付買付を作ることはない。過去の20:10等の完了記録は保存版として保持する。
+
+
+## 日次・週次・年次レポート
+
+確定損益を基準にしたPDF/図表の自動保存は [レポートの運用手順](forward-reports.md) を参照。
