@@ -9,7 +9,7 @@ foreach ($irRequired in @($irScript, $irPython)) {
 }
 $irPolicy = Get-Content -LiteralPath (Join-Path $irProject 'data\irbank_jsf\acquisition-policy.json') -Raw | ConvertFrom-Json
 $irExpiry = [DateTimeOffset]::Parse($irPolicy.ends_before)
-if ([DateTimeOffset]::Now -ge $irExpiry) { throw 'Free trial has already ended' }
+if ([DateTimeOffset]::Now -ge $irExpiry) { throw 'Authorized acquisition period has already ended' }
 $irUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 $irName = 'IRBANK-Trial-CodexStartup'
 $irCodexRoot = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path ([Environment]::GetFolderPath('UserProfile')) '.codex' }
@@ -23,7 +23,7 @@ $irLogon = New-ScheduledTaskTrigger -AtLogOn -User $irUser
 $irLogon.EndBoundary = $irExpiry.ToString('yyyy-MM-ddTHH:mm:sszzz')
 $irPrincipal = New-ScheduledTaskPrincipal -UserId $irUser -LogonType Interactive -RunLevel Limited
 $irSettings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 2) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -DeleteExpiredTaskAfter (New-TimeSpan -Days 1)
-$irTask = New-ScheduledTask -Action $irAction -Trigger @($irTimer, $irLogon) -Principal $irPrincipal -Settings $irSettings -Description 'Resume a missed IRBANK 21:00 JST run when Codex desktop is available; preserve daily quota and free-trial deadline.'
+$irTask = New-ScheduledTask -Action $irAction -Trigger @($irTimer, $irLogon) -Principal $irPrincipal -Settings $irSettings -Description 'Resume a missed IRBANK 21:00 JST run when Codex desktop is available; preserve daily quota and authorized acquisition deadline.'
 if ($Preview) {
     [pscustomobject]@{
         TaskName=$irName; Execute=$irAction.Execute; Arguments=$irAction.Arguments

@@ -193,8 +193,13 @@ class Client:
         if accounting not in ("all_http", "data_only"):
             raise Halt("invalid_quota_accounting")
         self.data_only = accounting == "data_only"
-        total_ceiling = 10000 if self.data_only else 9500
-        if not 0 < self.policy["max_total_requests"] <= total_ceiling:
+        from .irbank_budget import total_ceiling
+
+        try:
+            ceiling = total_ceiling(self.policy)
+        except (ValueError, KeyError, TypeError) as exc:
+            raise Halt("invalid_acquisition_extension") from exc
+        if not 0 < self.policy["max_total_requests"] <= ceiling:
             raise Halt("invalid_trial_total_limit")
         self.initial_data = self.policy.get("initial_data_requests")
         if self.data_only and (
@@ -262,7 +267,7 @@ class Client:
             raise Halt("invalid_daily_extension")
         return baseline + extra
 
-    def send(self, kind, code=None, end=None):
+    def send(self, kind, code=None, end=None, *, endpoint=None, params=None):
         if self.sent >= self.limit:
             raise Halt("run_request_limit")
         if self.last is not None:
@@ -327,8 +332,10 @@ class Client:
             self.since_usage += 1
         try:
             response = self.http.get(
-                "usage" if kind == "usage" else f"securities/{code}/jsf-margin-daily",
-                params=None if kind == "usage" else {"period": "1y", "to": end, "exchange": "XTKS"},
+                "usage" if kind == "usage" else (endpoint or f"securities/{code}/jsf-margin-daily"),
+                params=None
+                if kind == "usage"
+                else (params if endpoint else {"period": "1y", "to": end, "exchange": "XTKS"}),
             )
         except httpx.HTTPError:
             return None
@@ -355,6 +362,20 @@ class Client:
         save(self.root / "last-usage.json", dict(data, checked_at=self.tick().isoformat()))
 
     def get(self, code, end):
+        return self.get_resource(
+            f"securities/{code}/jsf-margin-daily",
+            {"period": "1y", "to": end, "exchange": "XTKS"},
+            code=code,
+            end=end,
+        )
+
+    def get_resource(self, endpoint, params=None, code=None, end=None):
+        if not re.fullmatch(
+            r"(securities|industries|financials|shareholders|"
+            r"securities/[0-9A-Z]{4}/(jsf-margin-daily|weekly-margin-balance))",
+            endpoint,
+        ):
+            raise Halt("unsupported_archive_endpoint")
         consecutive_429 = 0
         for attempt in range(4):
             day = self.tick().astimezone(JST).date().isoformat()
@@ -373,7 +394,7 @@ class Client:
                 or self.quota["used"] + self.since_usage >= remote_cap
             ):
                 raise Halt("remote_daily_headroom")
-            response = self.send("data", code, end)
+            response = self.send("data", code, end, endpoint=endpoint, params=params)
             if response is not None and response.status_code in (200, 404):
                 return response
             status = response.status_code if response is not None else 0

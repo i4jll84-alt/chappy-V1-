@@ -1,4 +1,4 @@
-"""Daily, trial-bounded IRBANK archival, prioritizing Plan A's first five years."""
+"""Daily, authorization-bounded IRBANK archival prioritizing Plan A required data."""
 
 import argparse
 import json
@@ -19,6 +19,9 @@ def inspect(root, stamp=None):
     policy = json.loads((root / "acquisition-policy.json").read_bytes())
     if policy.get("quota_accounting") != "data_only":
         raise jsf.Halt("daily_requires_data_only_accounting")
+    from .irbank_budget import total_ceiling
+
+    ceiling = total_ceiling(policy)
     schedule = policy["daily_schedule"]
     start = date.fromisoformat(schedule["from"])
     through = date.fromisoformat(schedule["through"])
@@ -31,7 +34,7 @@ def inspect(root, stamp=None):
         or type(schedule["max_data_requests"]) is not int
         or not 1 <= schedule["max_data_requests"] <= 1000
         or type(policy["max_total_requests"]) is not int
-        or not 1 <= policy["max_total_requests"] <= 10000
+        or not 1 <= policy["max_total_requests"] <= ceiling
         or type(policy.get("initial_data_requests")) is not int
         or not 0 <= policy["initial_data_requests"] <= policy["initial_requests"]
     ):
@@ -74,6 +77,9 @@ def inspect(root, stamp=None):
         "preserved_prior_data_attempts": totals["prior"],
         "trial_budget_start": totals["start"],
         "remaining_trial_data": max(0, policy["max_total_requests"] - totals["budget"]),
+        "budget_mode": "paid_extension" if policy.get("paid_extension") else "trial",
+        "authorized_period_data_attempts": totals["budget"],
+        "remaining_authorized_data": max(0, policy["max_total_requests"] - totals["budget"]),
     }
 
 
@@ -104,9 +110,24 @@ def run(project):
             if enabled(root)
             else ["first5", "history"]
         )
+        supplement = json.loads((root / "acquisition-policy.json").read_bytes()).get(
+            "supplementary_acquisition", {}
+        )
+        if supplement.get("enabled"):
+            from . import irbank_supplement
+
+            if not enabled(root) or not supplement.get("authorized_at"):
+                raise jsf.Halt("supplement_requires_fixed_priority_authorization")
+            phases = [
+                "first5_required",
+                "history_required",
+                *irbank_supplement.PHASES,
+                "first5",
+                "history",
+            ]
         phase_index = 0
         phase = phases[phase_index]
-        for _ in range(10):
+        for _ in range(len(phases) + 6):
             current = inspect(root)
             if current["state"] != "due":
                 report["state"] = current["state"]
@@ -117,7 +138,10 @@ def run(project):
             # Retain the original per-process ceiling of 950 HTTP attempts.
             with (folder / (stamp + ".stdout.log")).open("a", encoding="utf-8") as log:
                 with redirect_stdout(log):
-                    batch = jsf.run(project, root, 950, phase)
+                    if supplement.get("enabled") and phase in irbank_supplement.PHASES:
+                        batch = irbank_supplement.run(project, root, 950, phase)
+                    else:
+                        batch = jsf.run(project, root, 950, phase)
             report["batches"].append({"phase": phase, **batch})
             reason = batch.get("reason")
             if batch["state"] == "complete":

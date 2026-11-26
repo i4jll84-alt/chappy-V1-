@@ -149,3 +149,160 @@ def test_required_phase_order_precedes_continuous_history(tmp_path, monkeypatch)
     monkeypatch.setattr(jsf, "run", run)
     assert daily.run(tmp_path)["state"] == "archive_complete"
     assert phases == ["first5_required", "history_required", "first5", "history"]
+
+
+def paid_policy(root):
+    policy = setup(root)
+    policy["renewed_trial_budget"]["ends_before"] = policy["ends_before"]
+    policy["ends_before"] = "2027-01-04T00:00:00+09:00"
+    policy["max_total_requests"] = 41000
+    policy["daily_schedule"]["through"] = "2027-01-03"
+    policy["paid_extension"] = {
+        "authorized": True,
+        "authorized_at": "2026-11-26T22:30:00+09:00",
+        "authorization": "User authorized acquisition through all Jan 3",
+        "ends_before": policy["ends_before"],
+        "prior_max_total_requests": 10000,
+        "max_total_requests": 41000,
+    }
+    jsf.save(root / "acquisition-policy.json", policy)
+    return policy
+
+
+def test_paid_extension_keeps_ledger_and_does_not_reset_today(tmp_path):
+    paid_policy(tmp_path)
+    record(tmp_path, "2026-11-26", 1000)
+    r = daily.inspect(tmp_path, stamp("2026-11-26T23:00:00+09:00"))
+    assert r["state"] == "daily_quota_reached"
+    assert r["total_data_attempts"] == 2700
+    assert r["authorized_period_data_attempts"] == 1200
+    assert r["preserved_prior_data_attempts"] == 1500
+    assert r["budget_mode"] == "paid_extension"
+    tomorrow = daily.inspect(tmp_path, stamp("2026-11-27T08:00:00+09:00"))
+    assert tomorrow["remaining_daily_data"] == 1000
+    assert tomorrow["state"] == "due"
+
+
+@pytest.mark.parametrize(
+    ("time", "state"),
+    [
+        ("2026-12-04T21:00:00+09:00", "due"),
+        ("2027-01-03T23:59:59+09:00", "due"),
+        ("2027-01-04T00:00:00+09:00", "expired"),
+    ],
+)
+def test_paid_boundaries_and_legacy_cap_lift(tmp_path, time, state):
+    paid_policy(tmp_path)
+    record(tmp_path, "2026-11-25", 9800)
+    assert daily.inspect(tmp_path, stamp(time))["state"] == state
+
+
+@pytest.mark.parametrize(
+    "field", ["authorization", "authorized", "ends_before", "max_total_requests"]
+)
+def test_paid_malformed_extension_fails_closed(tmp_path, field):
+    policy = paid_policy(tmp_path)
+    policy["paid_extension"].pop(field)
+    jsf.save(tmp_path / "acquisition-policy.json", policy)
+    with pytest.raises((ValueError, KeyError)):
+        daily.inspect(tmp_path, stamp("2026-12-04T21:00:00+09:00"))
+    with pytest.raises(jsf.Halt, match="invalid_acquisition_extension"):
+        make_client(tmp_path, stamp("2026-12-04T21:00:00+09:00"))
+
+
+def test_paid_prior_ledger_tamper_still_stops(tmp_path):
+    paid_policy(tmp_path)
+    with closing(sqlite3.connect(tmp_path / "requests.sqlite")) as db, db:
+        db.execute("UPDATE requests SET http_status=503 WHERE id=1")
+    with pytest.raises(ValueError, match="prior_ledger_changed"):
+        daily.inspect(tmp_path, stamp("2026-12-04T21:00:00+09:00"))
+
+
+@pytest.mark.parametrize("provider_limit", [200, 1000])
+def test_all_resource_types_share_last_daily_slot(tmp_path, provider_limit):
+    paid_policy(tmp_path)
+    day = "2026-12-04"
+    record(tmp_path, day, provider_limit - 1)
+    used, requests = [provider_limit - 1], []
+
+    def serve(request):
+        requests.append(request.url.path)
+        if request.url.path.endswith("/usage"):
+            return httpx.Response(
+                200,
+                json={
+                    "limit": provider_limit,
+                    "used": used[0],
+                    "remaining": provider_limit - used[0],
+                },
+            )
+        used[0] += 1
+        assert request.url.params["security_code"] == "7203"
+        return httpx.Response(200, json={})
+
+    client = jsf.Client(
+        tmp_path,
+        "fixture",
+        transport=httpx.MockTransport(serve),
+        pause=Mock(),
+        tick=lambda: stamp(day + "T21:00:00+09:00"),
+    )
+    try:
+        assert client.get_resource("financials", {"security_code": "7203"}).status_code == 200
+        with pytest.raises(jsf.Halt, match="remote_daily_headroom"):
+            client.get("7203", "2021-11-19")
+        assert requests.count("/v1/financials") == 1
+        assert not any(p.endswith("/jsf-margin-daily") for p in requests)
+        assert used[0] == provider_limit
+    finally:
+        client.close()
+
+
+def test_paid_expiry_prevents_even_usage_or_supplement_http(tmp_path):
+    paid_policy(tmp_path)
+    client, calls = make_client(tmp_path, stamp("2027-01-04T00:00:00+09:00"))
+    try:
+        with pytest.raises(jsf.Halt, match="outside_free_trial_window"):
+            client.get_resource("industries")
+        assert not calls
+    finally:
+        client.close()
+
+
+def test_supplement_starts_only_after_required_data(tmp_path, monkeypatch):
+    root = tmp_path / "data/irbank_jsf"
+    policy = paid_policy(root)
+    policy["priority_plan"] = {"mode": priority.MODE}
+    policy["supplementary_acquisition"] = {"enabled": True, "authorized_at": "fixture"}
+    jsf.save(root / "acquisition-policy.json", policy)
+    monkeypatch.setattr(jsf, "now", lambda: stamp("2026-11-27T21:00:00+09:00"))
+    monkeypatch.setattr(daily, "safe_check", lambda *a: {"state": "waiting"})
+    from trading_system.research import irbank_supplement
+
+    phases = []
+
+    def run(project, root, limit, phase):
+        phases.append(phase)
+        return {"state": "complete", "requests_this_run": 0}
+
+    monkeypatch.setattr(jsf, "run", run)
+    monkeypatch.setattr(irbank_supplement, "run", run)
+    assert daily.run(tmp_path)["state"] == "archive_complete"
+    assert phases == [
+        "first5_required",
+        "history_required",
+        *irbank_supplement.PHASES,
+        "first5",
+        "history",
+    ]
+
+
+def test_missing_paid_authorization_cannot_extend_dates_with_lower_budget(tmp_path):
+    policy = paid_policy(tmp_path)
+    del policy["paid_extension"]
+    policy["max_total_requests"] = 10000
+    jsf.save(tmp_path / "acquisition-policy.json", policy)
+    with pytest.raises(ValueError, match="paid_extension_authorization_required"):
+        daily.inspect(tmp_path, stamp("2026-12-04T21:00:00+09:00"))
+    with pytest.raises(jsf.Halt, match="invalid_acquisition_extension"):
+        make_client(tmp_path, stamp("2026-12-04T21:00:00+09:00"))
