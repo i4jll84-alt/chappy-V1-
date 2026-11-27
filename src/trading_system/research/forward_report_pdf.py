@@ -418,12 +418,17 @@ def make_chart(key: str, plan: dict, metric: dict, width: float, height: float) 
     labels = [(f"プラン{key}", last_equity, plan_color)]
     if last_benchmark is not None:
         labels.append(("TOPIX換算", last_benchmark, TOPIX))
-    label_positions = [ypos(amount) for _, amount, _ in labels]
-    if len(labels) == 2 and abs(label_positions[0] - label_positions[1]) < 29:
-        midpoint = sum(label_positions) / 2
-        label_positions = [midpoint + 16, midpoint - 16]
+    label_min, label_max, label_gap = lower + 4, upper - 7, 30
+    label_positions = [max(label_min, min(label_max, ypos(amount))) for _, amount, _ in labels]
+    if len(labels) == 2:
+        low_index, high_index = sorted(range(2), key=label_positions.__getitem__)
+        if label_positions[high_index] - label_positions[low_index] < label_gap:
+            # Keep the separation after enforcing the plot bounds, including
+            # nearly equal endpoints at either the top or bottom of the chart.
+            low_position = max(label_min, min(label_positions[low_index], label_max - label_gap))
+            label_positions[low_index] = low_position
+            label_positions[high_index] = low_position + label_gap
     for (label, amount, color), y in zip(labels, label_positions, strict=True):
-        y = max(lower + 4, min(upper - 7, y))
         drawing.add(
             Line(
                 xpos(len(rows) - 1) + 4,
@@ -457,10 +462,26 @@ def overview(packet: dict, period: str) -> list:
     start, end = period_bounds(packet, period)
     story = [p(f"フォワード運用 {PERIOD_LABELS[period]}レポート", "title")]
     term = f"{start} - {end}"
+    asof, next_session = iso_day(packet["asof"]), iso_day(packet.get("next_session"))
     if period == "week":
-        term += "  |  月曜起点・日曜区切り／週の途中経過"
+        calendar_end = asof + timedelta(days=6 - asof.weekday())
+        caption = (
+            "週の最終営業日まで"
+            if next_session and next_session > calendar_end
+            else "週の途中経過"
+            if next_session
+            else "週の区切り未確認"
+        )
+        term += "  |  月曜起点・日曜区切り／" + caption
     elif period == "year":
-        term += "  |  年初来の途中経過"
+        caption = (
+            "年の最終営業日まで"
+            if next_session and next_session > asof.replace(month=12, day=31)
+            else "年初来の途中経過"
+            if next_session
+            else "年の区切り未確認"
+        )
+        term += "  |  " + caption
     story += [p(term, "subtitle"), Spacer(1, 5)]
     story += [p("全5プランの現在地", "section"), Spacer(1, 5)]
     rows = [
