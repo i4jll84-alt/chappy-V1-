@@ -82,6 +82,15 @@ def ensure_broker_app(project, source, path):
         raise OSError("broker_app_probe_failed")
 
 
+def prepare_research_app(project, source, path, requested):
+    from trading_system.research.daytrade_universe import capture_session_issue
+
+    local = datetime.fromtimestamp(requested / 1e9, ZoneInfo("Asia/Tokyo"))
+    if capture_session_issue(project, local) is None:
+        ensure_broker_app(project, source, path)
+    # The collector records its own calendar decision under its writer lock.
+
+
 def validate_settings(value):
     if not isinstance(value, dict) or set(value) != {
         "brokers",
@@ -802,7 +811,7 @@ class Launcher:
                     continue
                 key = "rakuten_app" if source == "rakuten" else "mufg_app"
                 task = self.vendor_executor.submit(
-                    ensure_broker_app, self.project, source, Path(settings[key])
+                    prepare_research_app, self.project, source, Path(settings[key]), requested
                 )
                 self.vendor_tasks[broker] = (task, requested, late)
             except (OSError, RuntimeError):

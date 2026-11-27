@@ -378,13 +378,16 @@ def run(
             not one_pass and (local_now.hour < 6 or clock() >= cutoff)
         ):
             status(state="not_started", reason="outside_start_hours")
-            return
+            return "not_started"
+        from trading_system.research.daytrade_universe import capture_session_issue, panel_location
+
+        if issue := capture_session_issue(root.parent.parent, local_now):
+            status(state="not_started", reason=issue)
+            return "not_started"
         if not can_start(root, resume):
             status(state="not_started", reason="stop_requested")
-            return
+            return "not_started"
         try:
-            from trading_system.research.daytrade_universe import panel_location
-
             folder = panel_location(root, start_day.date())
             symbols, book = configuration(folder)
             paired = (
@@ -393,7 +396,7 @@ def run(
             batches = chart_batches(symbols) if paired else [symbols]
             if stopped() or (not one_pass and clock() >= cutoff):
                 status(state="not_started", reason="stop_or_cutoff")
-                return
+                return "not_started"
             status(state="starting", frames=0)
             (opener or os.startfile)(str(book))
             db = sqlite3.connect(root / "research.sqlite")
@@ -530,7 +533,11 @@ def main():
     parser.add_argument("--resume", default="none")
     parser.add_argument("--snapshot-now", action="store_true")
     args = parser.parse_args()
-    run(PROJECT / "data/rss-panel", args.requested, args.resume, one_pass=args.snapshot_now)
+    outcome = run(
+        PROJECT / "data/rss-panel", args.requested, args.resume, one_pass=args.snapshot_now
+    )
+    if outcome == "not_started":
+        return
     from trading_system.research.shared_market import after_stop
 
     after_stop(PROJECT, datetime.fromtimestamp(args.requested / 1e9, JST).date(), "rakuten")

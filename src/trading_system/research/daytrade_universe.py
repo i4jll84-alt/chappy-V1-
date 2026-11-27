@@ -35,6 +35,25 @@ def paired_symbols(fixed, daily):
     )
 
 
+def daily_panel_required(project, day):
+    policy = project / "config/daytrade-universe.json"
+    return policy.exists() and day >= date.fromisoformat(
+        json.loads(policy.read_bytes())["from_session"]
+    )
+
+
+def capture_session_issue(project, moment):
+    """The legacy fixed panel also supports off-session snapshots."""
+    from trading_system.intraday_health import calendar_state
+
+    try:
+        if daily_panel_required(project, moment.date()) and not calendar_state(project, moment):
+            return "market_closed"
+    except (OSError, ValueError, KeyError, TypeError, sqlite3.Error):
+        return "capture_calendar_unavailable"
+    return None
+
+
 def panel_location(root, day):
     """Return the published panel for this session; legacy mode ends on explicit adoption."""
     folder = root / "daily" / day.isoformat()
@@ -65,10 +84,7 @@ def panel_location(root, day):
         if config.get("session") != day.isoformat() or symbols != expected:
             raise ValueError("invalid_panel_configuration")
         return folder
-    policy = root.parent.parent / "config/daytrade-universe.json"
-    if policy.exists() and day >= date.fromisoformat(
-        json.loads(policy.read_bytes())["from_session"]
-    ):
+    if daily_panel_required(root.parent.parent, day):
         raise ValueError("daily_panel_missing")
     return root
 

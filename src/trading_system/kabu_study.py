@@ -201,14 +201,17 @@ def run(
             not one_pass and (now.hour < 6 or now >= deadline - timedelta(minutes=1))
         ):
             status("not_started", "outside_start_hours")
-            return
+            return "not_started"
+        from trading_system.research.daytrade_universe import capture_session_issue, panel_location
+
+        if issue := capture_session_issue(project, now):
+            status("not_started", issue)
+            return "not_started"
         if not can_start(root, resume):
             status("not_started", "stop_requested")
-            return
+            return "not_started"
         try:
             with single_writer(shared):
-                from trading_system.research.daytrade_universe import panel_location
-
                 panel = panel_location(project / "data/rss-panel", requested_day.date())
                 config = json.loads((panel / "panel.json").read_bytes())
                 allowed = panel_symbols(config)
@@ -358,7 +361,8 @@ def main():
         help="Manual one-pass read, including after close",
     )
     a = p.parse_args()
-    run(PROJECT, a.requested, a.resume, one_pass=a.snapshot_now)
+    if run(PROJECT, a.requested, a.resume, one_pass=a.snapshot_now) == "not_started":
+        return
     from trading_system.research.shared_market import after_stop
 
     after_stop(PROJECT, datetime.fromtimestamp(a.requested / 1e9, JST).date(), "mufg_esmart")

@@ -144,6 +144,10 @@ def terminal_guidance(state, reason):
         return "定時確認による再起動待ちです。自動で取得を再確認します。"
     if reason == "capture_database_busy":
         return "保存DBが使用中です。外部操作を終え、取得を再開してください。"
+    if reason == "market_closed":
+        return "東証休場日のため、研究データの取得はお休みです。"
+    if reason == "capture_calendar_unavailable":
+        return "営業日を確認できません。保存済みの取引カレンダーを確認してください。"
     if reason == "daily_panel_missing":
         return "本日用の候補がありません。前営業日の日足と候補の保存結果を確認してください。"
     if reason == "stop_or_cutoff":

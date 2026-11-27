@@ -51,6 +51,55 @@ def test_research_result_is_specific_fresh_and_never_claims_running(tmp_path):
     assert launcher.research_result(tmp_path) is None
 
 
+@pytest.mark.parametrize("flag", ["0", "3", None, "1", "2"])
+@pytest.mark.parametrize("hour", [8, 17])
+def test_dated_capture_checks_session_before_vendor_workbook_and_login(
+    tmp_path, monkeypatch, flag, hour
+):
+    from trading_system import kabu_study, research_panel
+    from trading_system.research import daytrade_universe as universe
+
+    now = datetime.fromisoformat(f"2026-11-23T{hour:02}:14:00+09:00")
+    requested = int(now.timestamp() * 1e9)
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config/daytrade-universe.json").write_text('{"from_session":"2026-11-16"}')
+    calendar = {} if flag is None else {now.date().isoformat(): flag}
+    monkeypatch.setattr(universe, "calendar_days", lambda *_: (calendar, []))
+    vendor = Mock()
+    monkeypatch.setattr(launcher, "ensure_broker_app", vendor)
+    for source, broker in launcher.RESEARCH.items():
+        launcher.prepare_research_app(tmp_path, source, Path("vendor.exe"), requested)
+        root = launcher.collector_root(tmp_path, broker)
+        options = dict(one_pass=hour >= 16, clock=lambda: now)
+        if broker == "panel":
+            start, project = research_panel.run, root
+            options["opener"] = Mock(side_effect=AssertionError("unexpected Excel launch"))
+        else:
+            start, project = kabu_study.run, tmp_path
+            options["listener_ready"] = Mock(side_effect=AssertionError("unexpected API call"))
+
+        if flag in {"1", "2"}:
+            vendor.assert_called_with(tmp_path, source, Path("vendor.exe"))
+            with pytest.raises(ValueError, match="daily_panel_missing"):
+                start(project, requested, "none", **options)
+            status = json.loads((root / "status.json").read_bytes())
+            assert (status["state"], status["reason"]) == ("failed", "daily_panel_missing")
+        else:
+            vendor.assert_not_called()
+            root.mkdir(parents=True)
+            launcher.publish_stop(root)
+            marker = root / "STOP"
+            ticket = launcher.stop_ticket(marker)
+            assert start(project, requested, ticket, **options) == "not_started"
+            assert launcher.stop_ticket(marker) == ticket
+            status = json.loads((root / "status.json").read_bytes())
+            reason = "capture_calendar_unavailable" if flag is None else "market_closed"
+            assert (status["state"], status["reason"]) == ("not_started", reason)
+            message = launcher.research_result(tmp_path, requested, broker)
+            assert ("営業日を確認できません" if flag is None else "東証休場日") in message
+        assert not (root / "research.sqlite").exists()
+
+
 def settings():
     return {
         "brokers": ["rakuten"],
