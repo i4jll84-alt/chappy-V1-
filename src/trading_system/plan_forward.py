@@ -102,6 +102,52 @@ def display_status(plan):
     return state
 
 
+def brief_status(report):
+    """Project the saved status only. Keep missing, null and false observations distinct."""
+    fields = (
+        "version",
+        "status",
+        "processing_status",
+        "last_mark",
+        "holdings_date",
+        "last_decision",
+        "next_signal",
+        "next_entry",
+        "decision_status",
+        "decision_state",
+        "decision_cutoff",
+        "decision_recorded_at",
+        "decision_origin",
+        "entry_decision_pending",
+        "allow_entries",
+        "coverage_ok",
+        "coverage_counts",
+        "valuation_complete",
+        "issue",
+        "reason",
+        "no_buy_reason",
+        "regime_reason",
+        "morning_recovery",
+        "review_status",
+        "review_count",
+        "last_review",
+    )
+    plans = {}
+    for key, row in report["plans"].items():
+        brief = {field: row[field] for field in fields if field in row}
+        review = row.get("last_review")
+        if isinstance(review, dict) and isinstance(review.get("issues"), list):
+            brief["last_review"] = {
+                "date": review.get("date"),
+                "issue_count": len(review["issues"]),
+            }
+        if "entitlement_review" in row:
+            issues = row["entitlement_review"]
+            brief["entitlement_review_count"] = len(issues) if isinstance(issues, list) else None
+        plans[key] = brief
+    return {**report, "plans": plans}
+
+
 def publish_page(root, report):
     def yen(v):
         return "—" if v is None else f"{Decimal(str(v)):,.0f}円"
@@ -273,6 +319,7 @@ def main(argv=None):
     actions = parser.add_mutually_exclusive_group(required=True)
     for action in ("due", "status", "list", "catch-up", "evening-check", "scheduled-close"):
         actions.add_argument("--" + action, action="store_true")
+    actions.add_argument("--status-brief", action="store_true", help="read a compact saved status")
     parser.add_argument("--project", type=Path, default=Path(__file__).resolve().parents[2])
     opts = parser.parse_args(argv)
     if opts.scheduled_close:
@@ -294,7 +341,10 @@ def main(argv=None):
     else:
         path = opts.project / "data/plan-forward/summary.json"
         result = read(path) if path.exists() else {"status": "not_started", "plans": {}}
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    if opts.status_brief:
+        print(json.dumps(brief_status(result), ensure_ascii=False, separators=(",", ":")))
+    else:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
     return 2 if result.get("status") in ("error", "attention") else 0
 
 

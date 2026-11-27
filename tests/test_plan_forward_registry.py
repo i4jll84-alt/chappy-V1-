@@ -91,3 +91,53 @@ def test_catalog_rejects_duplicate_or_unsafe_account_paths(tmp_path):
     setup_catalog(tmp_path, active("../B"))
     with pytest.raises(ValueError):
         plans.catalog(tmp_path)
+
+
+def test_brief_status_reads_all_saved_plans_and_preserves_warnings(tmp_path, capsys):
+    path = tmp_path / "data/plan-forward/summary.json"
+    path.parent.mkdir(parents=True)
+    recovery = {"state": "error", "error_type": "TimeoutError"}
+    report = {
+        "status": "error",
+        "checked_at": "2026-11-27T08:55:00+09:00",
+        "plans": {
+            "A": {"status": "waiting_inputs", "issue": "missing", "positions": {"test": 100}},
+            "B": {"status": "blocked", "morning_recovery": recovery, "decision_cutoff": None},
+            "C": {
+                "status": "needs_review",
+                "coverage_ok": False,
+                "valuation_complete": False,
+                "entitlement_review": [{"code": "test"}],
+                "last_review": {"date": "2026-11-26", "issues": [["test", "missing"]]},
+            },
+            "A9": {"status": "waiting_signal", "decision_recorded_at": None},
+            "A10": {"status": "waiting_signal"},
+        },
+    }
+    saved = json.dumps(report).encode()
+    path.write_bytes(saved)
+    args = ["--project", str(tmp_path)]
+    assert plans.main([*args, "--status-brief"]) == 2
+    brief = json.loads(capsys.readouterr().out)
+    assert brief["status"] == "error" and brief["checked_at"] == report["checked_at"]
+    assert brief["plans"].keys() == report["plans"].keys()
+    assert brief["plans"]["A"] == {"status": "waiting_inputs", "issue": "missing"}
+    assert brief["plans"]["B"] == report["plans"]["B"]
+    assert brief["plans"]["C"] == {
+        "status": "needs_review",
+        "coverage_ok": False,
+        "valuation_complete": False,
+        "entitlement_review_count": 1,
+        "last_review": {"date": "2026-11-26", "issue_count": 1},
+    }
+    assert brief["plans"]["A9"] == report["plans"]["A9"]
+    assert brief["plans"]["A10"] == report["plans"]["A10"]
+    assert plans.main([*args, "--status"]) == 2
+    assert json.loads(capsys.readouterr().out) == report
+    assert path.read_bytes() == saved
+
+
+def test_brief_status_before_first_run_creates_no_data(tmp_path, capsys):
+    assert plans.main(["--project", str(tmp_path), "--status-brief"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"status": "not_started", "plans": {}}
+    assert list(tmp_path.iterdir()) == []

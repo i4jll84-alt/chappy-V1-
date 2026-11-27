@@ -68,11 +68,14 @@ Aは新しい台帳を持つ。Bは既存の300万円口座で開始記録以降
 ```powershell
 .\.venv\Scripts\python.exe -m trading_system.plan_forward --list
 .\.venv\Scripts\python.exe -m trading_system.plan_forward --status
+.\.venv\Scripts\python.exe -m trading_system.plan_forward --status-brief
 .\.venv\Scripts\python.exe -m trading_system.plan_forward --due
 .\.venv\Scripts\python.exe -m trading_system.plan_forward --catch-up
 .\.venv\Scripts\python.exe -m trading_system.plan_forward --evening-check
 .\.venv\Scripts\python.exe -m trading_system.plan_morning_check
 ```
+
+日々の状態確認には `--status-brief` を使う。保存済み集計の更新日時と全プランの状態、判断期限・記録時刻、対象日、欠損理由、朝の補完、評価・レビュー状況をまとめて確認できる。更新日時が対象日と合わない場合は、当日の完了を確認できていないと扱う。要確認項目の詳細や口座・売買の検証には `--status` または `data/plan-forward/summary.json` を参照する。どちらの状態表示も集計を更新しない。
 
 ## プランC　好決算ドリフト・3立会日の初押し
 
