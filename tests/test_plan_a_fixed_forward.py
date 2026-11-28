@@ -224,6 +224,30 @@ def test_first_ready_variant_preserves_rankings_when_original_resumes_after_revi
     assert calls == [START]
 
 
+def test_retired_fixed_accounts_keep_pending_decisions_without_processing_them(family, tmp_path):
+    accounts, _ = family
+    original = plan_forward.run_due(tmp_path, now=clock(START))["plans"]
+    config = tmp_path / "config/forward-plans.json"
+    registry = plan_forward.read(config)
+    frozen = {}
+    for row in registry["plans"]:
+        key = row["id"]
+        if key in ("A9", "A10"):
+            row["stage"] = "retired"
+            book = accounts / key
+            frozen[key] = {p.relative_to(book): p.read_bytes() for p in book.rglob("*.json")}
+    plan_forward.save(config, registry)
+    for day in ("2026-11-26", "2026-11-27"):
+        result = plan_forward.run_due(tmp_path, now=clock(day), recovery_signal=START)
+        assert set(result["plans"]) == {"A"}
+        for key, expected in frozen.items():
+            archive = accounts.parent / "retired" / (key + "-" + original[key]["version"])
+            assert plan_forward.read(archive / "retirement.json")["final_report"] == original[key]
+            book = archive / "account"
+            assert {p.relative_to(book): p.read_bytes() for p in book.rglob("*.json")} == expected
+            assert not (accounts / key).exists()
+
+
 def test_rejected_version_does_not_enroll_an_invalid_account(family, tmp_path):
     accounts, _ = family
     path = tmp_path / "config/forward-plans.json"

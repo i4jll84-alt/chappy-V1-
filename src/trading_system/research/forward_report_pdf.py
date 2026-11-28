@@ -39,7 +39,7 @@ PLAN_ORDER = ("A", "B", "C", "A9", "A10")
 
 def plan_order(packet):
     ids = tuple(packet.get("active_plan_ids", PLAN_ORDER))
-    if ids not in (PLAN_ORDER, ("A", "B", "A9", "A10")):
+    if ids not in (PLAN_ORDER, ("A", "B", "A9", "A10"), ("A", "B")):
         raise ValueError("invalid report plan order")
     return ids
 

@@ -12,7 +12,11 @@ from time import monotonic
 from zoneinfo import ZoneInfo
 
 from trading_system.brokers.locking import single_writer
-from trading_system.plan_retirement import retire_for_v21, retire_previous_c
+from trading_system.plan_retirement import (
+    retire_fixed_comparisons,
+    retire_for_v21,
+    retire_previous_c,
+)
 from trading_system.storage.store import atomic_write, canonical
 
 JST = ZoneInfo("Asia/Tokyo")
@@ -216,6 +220,7 @@ def run_due(project, *, now=None, recovery_signal=None):
         with single_writer(root):
             plans = catalog(project)
             report = {"status": "ok", "checked_at": now.isoformat(), "plans": {}}
+            retire_fixed_comparisons(root, plans, current_time())
             retire_for_v21(project, root, plans, current_time())
             for plan in plans:
                 if plan["stage"] != "active":

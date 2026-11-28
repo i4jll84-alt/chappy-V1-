@@ -30,7 +30,7 @@
     {
       "id": "A9",
       "name": "プランA・9営業日固定",
-      "stage": "active",
+      "stage": "retired",
       "adapter": "plan_a_forward",
       "version": "s3-jsf-morning-fixed9-v1",
       "start": "2026-11-25",
@@ -39,7 +39,7 @@
     {
       "id": "A10",
       "name": "プランA・10営業日固定",
-      "stage": "active",
+      "stage": "retired",
       "adapter": "plan_a_forward",
       "version": "s3-jsf-morning-fixed10-v1",
       "start": "2026-11-25",

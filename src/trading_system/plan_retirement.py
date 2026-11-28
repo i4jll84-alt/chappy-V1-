@@ -1,4 +1,4 @@
-"""Preserve the first C experiment when its registered PEAD successor is enrolled."""
+"""Archive retired paper accounts together with their final status and file hashes."""
 
 import hashlib
 import json
@@ -87,6 +87,12 @@ def _archive(root, old_spec, spec, now):
             or _inventory(archive) != record["files_sha256"]
         ):
             raise ValueError("retirement_inventory_mismatch")
+
+
+def retire_fixed_comparisons(root, plans, now):
+    for plan in plans:
+        if plan["id"] in ("A9", "A10") and plan["stage"] == "retired":
+            _archive(root, {key: plan[key] for key in OLD_SPEC}, None, now)
 
 
 def retire_for_v21(project, root, plans, now):

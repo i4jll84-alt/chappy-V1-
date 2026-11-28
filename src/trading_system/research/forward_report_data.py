@@ -778,6 +778,9 @@ def build_report_packet(project, asof, *, now=None):
     active = {p["id"]: p for p in registry if p["stage"] == "active"}
     v21 = active.get("B", {}).get("adapter") == "plan_b_v21"
     ids = ("A", "B", "A9", "A10") if v21 else ACTIVE_IDS
+    retired = {p["id"] for p in registry if p["stage"] == "retired"}
+    if v21 and {"A9", "A10"} <= retired:
+        ids = ("A", "B")
     if set(active) != set(ids):
         raise ReportInputError("active plan registry changed; review report mapping")
     start = min(p["start"] for p in active.values())
