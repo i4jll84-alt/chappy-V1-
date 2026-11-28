@@ -13,7 +13,7 @@ from trading_system.plan_schedule import EVENING_CHECK
 
 JST = ZoneInfo("Asia/Tokyo")
 PREOPEN_CHECK = time(7, 40)
-ACCOUNT_LABELS = {"C500": "プランC（500）", "A9": "A9（9日固定）", "A10": "A10（10日固定）"}
+ACCOUNT_LABELS = {"C500": "プランC（500ー888）", "A9": "A9（9日固定）", "A10": "A10（10日固定）"}
 STEP_LABELS = {
     "daily": "日足・銘柄情報",
     "jsf": "日証金",
