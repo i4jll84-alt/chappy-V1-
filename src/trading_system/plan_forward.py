@@ -98,6 +98,8 @@ def display_status(plan):
     decision = plan.get("decision_status") or plan.get("decision_state")
     if state == "waiting_close" and decision in ("missed_preopen", "stopped", "stopped_preopen"):
         return decision
+    if plan.get("adapter") == "plan_c500" and state == "waiting_close" and decision == "exits_only":
+        return "exits_only"
     if plan.get("adapter") == "plan_c_pead_forward":
         if state == "waiting_inputs":
             return "pead_inputs"
@@ -131,6 +133,9 @@ def brief_status(report):
         "reason",
         "no_buy_reason",
         "regime_reason",
+        "target_budget",
+        "candidate_count",
+        "order_count",
         "morning_recovery",
         "review_status",
         "review_count",

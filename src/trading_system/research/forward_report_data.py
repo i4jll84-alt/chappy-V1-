@@ -302,7 +302,7 @@ def _a_account(reader, plan, asof, required):
 
 
 def _v21_account(reader, plan, asof, required):
-    book = reader.project / "data/plan-forward/accounts/B"
+    book = reader.project / "data/plan-forward/accounts" / plan["id"]
     current = reader.read(book / "initial.json")
     if (
         current["strategy"] != plan["version"]
@@ -702,7 +702,7 @@ def _planned(reader, plan, state, next_day, master):
         if plan["id"] == "C" and decision["starting_account_sha256"] != state.get("_native_hash"):
             raise ReportInputError("C next decision chain changed")
         if (
-            plan.get("adapter") == "plan_b_v21"
+            plan.get("adapter") in ("plan_b_v21", "plan_c500")
             and decision["previous_sha256"] != state["_v21_hash"]
         ):
             raise ReportInputError("V21 next decision chain changed")
@@ -781,6 +781,8 @@ def build_report_packet(project, asof, *, now=None):
     retired = {p["id"] for p in registry if p["stage"] == "retired"}
     if v21 and {"A9", "A10"} <= retired:
         ids = ("A", "B")
+    if active.get("C500", {}).get("adapter") == "plan_c500":
+        ids = (*ids, "C500")
     if set(active) != set(ids):
         raise ReportInputError("active plan registry changed; review report mapping")
     start = min(p["start"] for p in active.values())
@@ -823,7 +825,7 @@ def build_report_packet(project, asof, *, now=None):
                 raise ReportInputError("account baseline close missing")
             required = [d for d in days if d > plan["start"]]
             loader = _b_account if key == "B" else _c_account if key == "C" else _a_account
-            if key == "B" and v21:
+            if (key == "B" and v21) or plan.get("adapter") == "plan_c500":
                 loader = _v21_account
             state, closed, fees, _ = loader(reader, plan, asof, required)
             if key == "C":

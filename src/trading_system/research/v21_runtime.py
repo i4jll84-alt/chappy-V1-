@@ -142,7 +142,7 @@ def credit_receipts(project, dates, asof):
     return refs
 
 
-def native_runner(project, scratch, capital, state, client=None, **options):
+def native_runner(project, scratch, capital, state, client=None, *, runner_type=None, **options):
     mod = engine(project)
     cfg = mod.LiveStrategyConfig(
         initial_capital=capital,
@@ -153,7 +153,8 @@ def native_runner(project, scratch, capital, state, client=None, **options):
         corp_actions_path=project / "data/plan-forward/inputs/v21/corporate_actions.csv",
         **options,
     )
-    runner = mod.DailyTradingRunner(cfg, client)
+    runner_class = runner_type(mod.DailyTradingRunner) if runner_type else mod.DailyTradingRunner
+    runner = runner_class(cfg, client)
     if state is not None:
         cfg.state_path.write_text(json.dumps(state, allow_nan=False), encoding="utf8")
     return runner
@@ -166,7 +167,7 @@ def initial_native(project, scratch, capital):
     return json.loads(runner.cfg.state_path.read_bytes())
 
 
-def morning(project, scratch, previous, capital, window, target, now, cutoff):
+def morning(project, scratch, previous, capital, window, target, now, cutoff, *, entries=None):
     history, client, refs = market_inputs(project, window, now)
     archive = project / "data/swing-forward/credit"
     try:
@@ -184,6 +185,7 @@ def morning(project, scratch, previous, capital, window, target, now, cutoff):
         client,
         previous_credit_day=window[-2],
         jsf_archive_dir=archive,
+        **({"runner_type": entries.runner_type, "top_n_candidates": 0} if entries else {}),
     )
     history.to_parquet(runner.cfg.data_dir / "recent_daily_history.parquet", index=False)
     # V21 can emit exit instructions even when JSF fails. Keep this status for recovery.
@@ -206,11 +208,18 @@ def morning(project, scratch, previous, capital, window, target, now, cutoff):
     state = json.loads(runner.cfg.state_path.read_bytes())
     if state["cash_audit_hold"]:
         raise ValueError("v21_cash_audit_hold")
+    rows = orders.to_dict("records")
+    extra = (
+        entries.complete(runner, state, rows, credit_ok, set(factors) | blocked, history)
+        if entries
+        else {}
+    )
     return dict(
+        **extra,
         credit_ready=credit_ok,
         split_factors=factors,
         blocked_splits=sorted(blocked),
-        orders=orders.to_dict("records"),
+        orders=rows,
         native=state,
         price_and_master_sources=refs,
         jsf_sources=jsf,

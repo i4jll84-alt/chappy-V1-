@@ -50,7 +50,7 @@ def snapshot(native, capital, marks, realized, day):
     )
 
 
-def prepare(project, scratch, prev, capital, window, target, now, stamp):
+def prepare(project, scratch, prev, capital, window, target, now, stamp, *, entry_profile=None):
     signal = window[-1]
     deadline = at(target, "09:00")
     missed = dict(
@@ -62,15 +62,30 @@ def prepare(project, scratch, prev, capital, window, target, now, stamp):
     )
     payload = missed
     if now < deadline:
+        entries = (
+            entry_profile(project, prev["account"], window, target, now) if entry_profile else None
+        )
         payload = runtime.morning(
-            project, scratch, prev["native"], capital, window, target, now, at(target, "07:45")
+            project,
+            scratch,
+            prev["native"],
+            capital,
+            window,
+            target,
+            now,
+            at(target, "07:45"),
+            **({"entries": entries} if entries else {}),
         )
     recorded = stamp()
     if recorded >= deadline:
         payload = missed
         status = "missed_preopen"
     else:
-        status = "ready" if payload["credit_ready"] else "exits_only"
+        status = (
+            "ready"
+            if payload["credit_ready"] and not payload.get("no_buy_reason")
+            else "exits_only"
+        )
     picks = []
     for row in payload["orders"]:
         if row["区分"].startswith("買い#"):
@@ -83,11 +98,12 @@ def prepare(project, scratch, prev, capital, window, target, now, stamp):
                     shares=int(row["株数"]),
                     limit_price=float(row["指値または逆指値"]),
                     prev_close=float(row["基準価格"]),
-                    rank=len(picks) + 1,
+                    rank=row.get("rank", len(picks) + 1),
+                    **({"sector33_code": row["sector33_code"]} if entry_profile else {}),
                 )
             )
     return dict(
-        strategy=runtime.VERSION,
+        strategy=entry_profile.version if entry_profile else runtime.VERSION,
         target=target,
         signal_date=signal,
         cutoff=now.isoformat(),
@@ -218,10 +234,23 @@ def simulate(project, scratch, decision, capital, bars, previous, stopped):
             )
     realized = previous["account"]["realized"] + sum(t["net"] for t in trades)
     account = snapshot(native, capital, marks, realized, day)
+    sectors = {
+        p["code5"]: p["sector33_code"]
+        for p in decision["native"]["positions"]
+        if "sector33_code" in p
+    }
+    sectors.update(
+        {p["code"]: p["sector33_code"] for p in decision.get("picks", []) if "sector33_code" in p}
+    )
+    for pos in native["positions"]:
+        if pos["code5"] in sectors:
+            pos["sector33_code"] = sectors[pos["code5"]]
+            account["positions"][pos["code5"]]["sector33_code"] = sectors[pos["code5"]]
     return dict(native=native, account=account, trades=trades, fees=fees, modeled_executions=rows)
 
 
-def advance(project, book, *, start, capital, now):
+def advance(project, book, *, start, capital, now, entry_profile=None):
+    version = entry_profile.version if entry_profile else runtime.VERSION
     elapsed = monotonic()
 
     def stamp():
@@ -237,11 +266,11 @@ def advance(project, book, *, start, capital, now):
                 dict(
                     native=native,
                     account=snapshot(native, capital, {}, 0, start),
-                    strategy=runtime.VERSION,
+                    strategy=version,
                 ),
             )
         prev = read(path)
-        if prev["strategy"] != runtime.VERSION or prev["account"]["initial_capital"] != capital:
+        if prev["strategy"] != version or prev["account"]["initial_capital"] != capital:
             raise ValueError("v21_account_changed")
         marks = sorted((book / "sessions").glob("*/close.json"))
         if marks:
@@ -266,13 +295,25 @@ def advance(project, book, *, start, capital, now):
             if not decision_path.is_file():
                 try:
                     decision = prepare(
-                        project, scratch, prev, capital, window, target, stamp(), stamp
+                        project,
+                        scratch,
+                        prev,
+                        capital,
+                        window,
+                        target,
+                        stamp(),
+                        stamp,
+                        entry_profile=entry_profile,
                     )
                 except (FileNotFoundError, ValueError) as exc:
                     return dict(**summary, status="waiting_inputs", issue=str(exc)[:150])
                 write(decision_path, decision)
             decision = read(decision_path)
-            if decision["target"] != target or decision["previous_sha256"] != signature(prev):
+            if (
+                decision["target"] != target
+                or decision.get("strategy") != version
+                or decision["previous_sha256"] != signature(prev)
+            ):
                 raise ValueError("v21_frozen_decision_changed")
             notice = preopen_stop(project, book, folder, decision, at(target, "09:00"), stamp)
             summary.update(
@@ -282,6 +323,14 @@ def advance(project, book, *, start, capital, now):
                 last_decision=signal,
                 candidate_count=len(decision["picks"]),
             )
+            if entry_profile:
+                summary.update(
+                    candidate_count=len(decision.get("ranked", [])),
+                    order_count=len(decision["picks"]),
+                    no_buy_reason=decision.get("no_buy_reason"),
+                    regime=decision.get("regime"),
+                    target_budget=decision.get("target_budget"),
+                )
             if now < at(target, "15:30"):
                 return dict(**summary, status="waiting_close")
             try:

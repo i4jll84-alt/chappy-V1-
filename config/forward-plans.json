@@ -19,6 +19,15 @@
       "capital": 3000000
     },
     {
+      "id": "C500",
+      "name": "プランC（500）",
+      "stage": "active",
+      "adapter": "plan_c500",
+      "version": "c500-topix25-sector3-v1",
+      "start": "2026-11-27",
+      "capital": 5000000
+    },
+    {
       "id": "C",
       "name": "好決算ドリフト・3日初押し（4ATR・60立会日）",
       "stage": "retired",

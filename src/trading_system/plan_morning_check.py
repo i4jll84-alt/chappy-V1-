@@ -49,7 +49,7 @@ def apply_state(item, state, reason):
 
 
 def official(project, key, signal, target, spec):
-    if key in ("A", "A9", "A10", "C") or spec.get("adapter") == "plan_b_v21":
+    if key in ("A", "A9", "A10", "C") or spec.get("adapter") in ("plan_b_v21", "plan_c500"):
         path = project / "data/plan-forward/accounts" / key / "sessions" / target / "decision.json"
         return read(path) if path.is_file() else None
     capital = spec["capital"]
@@ -162,12 +162,16 @@ def assess_plan(project, key, spec, signal, target, start, deadline, checked):
         return apply_state(item, "outside", "比較対象の開始前または非稼働")
     try:
         doc = official(project, key, signal, target, spec)
-        family = "A" if key in ("A9", "A10") or spec.get("adapter") == "plan_b_v21" else key
+        family = (
+            "A"
+            if key in ("A9", "A10") or spec.get("adapter") in ("plan_b_v21", "plan_c500")
+            else key
+        )
         if doc is None:
             return apply_state(
                 item, "pending" if checked < deadline else "missed", "対象日の確定記録なし"
             )
-        if (key in ("A9", "A10") or spec.get("adapter") == "plan_b_v21") and doc.get(
+        if (key in ("A9", "A10") or spec.get("adapter") in ("plan_b_v21", "plan_c500")) and doc.get(
             "strategy"
         ) != spec["version"]:
             return apply_state(item, "unverified", "口座と保存判定のルール版が一致しない")
@@ -190,7 +194,7 @@ def assess_plan(project, key, spec, signal, target, start, deadline, checked):
         if state == "missed_preopen":
             return apply_state(item, "missed", "寄付前判定の欠測を記録")
         if state not in ("ready", "blocked", "insufficient_data") and not (
-            pead and state == "exits_only"
+            (pead or spec.get("adapter") in ("plan_b_v21", "plan_c500")) and state == "exits_only"
         ):
             return apply_state(item, "unverified", "確定状態が未確認")
         if state == "blocked":
@@ -199,8 +203,8 @@ def assess_plan(project, key, spec, signal, target, start, deadline, checked):
             )
 
         picks = doc["picks" if pead else {"A": "picks", "B": "candidates", "C": "ranked"}[family]]
-        item["candidate_count"] = len(doc.get("ranked", picks) if pead else picks)
-        if key == "B":
+        item["candidate_count"] = len(doc.get("ranked", picks) if pead or key == "C500" else picks)
+        if key in ("B", "C500"):
             item["order_count"] = len(picks) if family == "A" else len(doc["orders"])
         elif key == "C":
             item["order_count"] = len(doc["plan"]["buys"])
@@ -227,6 +231,12 @@ def assess_plan(project, key, spec, signal, target, start, deadline, checked):
             return apply_state(item, "missed", "確定完了が09:00以降")
         if key == "C" and state == "insufficient_data":
             return apply_state(item, "guarded", "資料不足による判定不可。既存建玉の出口は継続")
+        if key == "C500" and state == "exits_only":
+            if picks:
+                return apply_state(item, "unverified", "新規買付停止の判定に注文あり")
+            return apply_state(
+                item, "guarded", doc.get("no_buy_reason") or "日証金の期限内照合が未完了"
+            )
         if spec.get("adapter") == "plan_b_v21" and state == "exits_only":
             return apply_state(item, "guarded", "日証金の確認期限を過ぎたため新規買付を停止")
         if pead and not doc["allow_entries"]:
@@ -294,7 +304,7 @@ def record_startup(project, report, *, now=None):
         k: assess_plan(project, k, specs.get(k), signal, target, start, deadline, checked)
         for k in ("A", "B")
     }
-    for key in ("C", "A9", "A10"):
+    for key in ("C", "C500", "A9", "A10"):
         spec = specs.get(key)
         if spec and spec["stage"] == "active" and signal >= spec["start"]:
             rows[key] = assess_plan(project, key, spec, signal, target, start, deadline, checked)
@@ -312,7 +322,7 @@ def record_startup(project, report, *, now=None):
             or not (project / "data/a0-5-paper/enabled").is_file()
         ),
     }
-    tracked = ["A", "A9", "A10"]
+    tracked = ["A", "A9", "A10", "C500"]
     if specs.get("B", {}).get("adapter") == "plan_b_v21":
         tracked.append("B")
     for key in tracked:
