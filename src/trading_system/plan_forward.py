@@ -12,7 +12,7 @@ from time import monotonic
 from zoneinfo import ZoneInfo
 
 from trading_system.brokers.locking import single_writer
-from trading_system.plan_retirement import retire_previous_c
+from trading_system.plan_retirement import retire_for_v21, retire_previous_c
 from trading_system.storage.store import atomic_write, canonical
 
 JST = ZoneInfo("Asia/Tokyo")
@@ -61,7 +61,7 @@ def catalog(project):
         if key in seen or not re.fullmatch("[A-Z][A-Z0-9_-]{0,31}", key):
             raise ValueError(f"invalid or duplicate plan id: {key}")
         seen.add(key)
-        if not p["name"] or p["stage"] not in ("research", "active"):
+        if not p["name"] or p["stage"] not in ("research", "active", "retired"):
             raise ValueError(f"invalid stage or name: {key}")
         if p["stage"] == "active":
             if (
@@ -216,8 +216,9 @@ def run_due(project, *, now=None, recovery_signal=None):
         with single_writer(root):
             plans = catalog(project)
             report = {"status": "ok", "checked_at": now.isoformat(), "plans": {}}
+            retire_for_v21(project, root, plans, current_time())
             for plan in plans:
-                if plan["stage"] == "research":
+                if plan["stage"] != "active":
                     continue
                 key = plan["id"]
                 spec = account_spec(plan)

@@ -33,6 +33,10 @@ def root_for(project, capital=None):
     return root if capital is None else root / "accounts" / str(int(capital))
 
 
+def active_capitals(project):
+    return tuple(c for c in A0_5_PAPER_CAPITALS if not (root_for(project, c) / "RETIRED").exists())
+
+
 def enabled(project):
     return (root_for(project) / "enabled").is_file()
 
@@ -50,7 +54,7 @@ def select(project, active):
         if active and not flag.exists():
             atomic_write(flag, datetime.now(JST).isoformat().encode())
         elif not active and flag.exists():
-            for capital in A0_5_PAPER_CAPITALS:
+            for capital in active_capitals(project):
                 account = root_for(project, capital)
                 if (account / "ledger.sqlite").is_file():
                     s = book.load(account, capital)
@@ -72,7 +76,7 @@ def manual_schedule(project, code, scheduled, source, now):
         raise ValueError("確認した原本と将来の決算日（期間内予定なしは none）を指定してください")
     base = root_for(project)
     with single_writer(base):
-        for capital in A0_5_PAPER_CAPITALS:
+        for capital in active_capitals(project):
             root = root_for(project, capital)
             s = book.load(root, capital)
             s["manual"].setdefault(day, {})[code] = dict(
@@ -222,7 +226,7 @@ def mark_stop(project, day, now):
 def opening(project, now=None, capital=None):
     now = now or datetime.now(JST)
     if capital is None:
-        accounts = {str(value): opening(project, now, value) for value in A0_5_PAPER_CAPITALS}
+        accounts = {str(value): opening(project, now, value) for value in active_capitals(project)}
         states = {row["state"] for row in accounts.values()}
         state = (
             "stopped"
@@ -232,6 +236,8 @@ def opening(project, now=None, capital=None):
             else "partial"
         )
         return {"state": state, "accounts": accounts}
+    if capital not in active_capitals(project):
+        return {"state": "retired"}
     day = pd.Timestamp(now.astimezone(JST).date())
     if not enabled(project):
         return {"state": "off"}
@@ -242,6 +248,8 @@ def opening(project, now=None, capital=None):
         return {"state": "before_open"}
     root = root_for(project, capital)
     with single_writer(root_for(project)):
+        if capital not in active_capitals(project):
+            return {"state": "retired", "mode": MODE}
         if not enabled(project) or stopped(project):
             return {"state": "stopped"}
         try:
@@ -336,10 +344,12 @@ def run(
                 capital=value,
                 _record_clock=_record_clock,
             )
-            for value in A0_5_PAPER_CAPITALS
+            for value in active_capitals(project)
         }
         state = "stopped" if all(r["state"] == "stopped" for r in accounts.values()) else "accounts"
         return {"state": state, "mode": MODE, "accounts": accounts}
+    if capital not in active_capitals(project):
+        return {"state": "retired", "mode": MODE}
     day = pd.Timestamp(date or now.astimezone(JST).date())
     if not preview and not enabled(project):
         return {"state": "off", "mode": MODE}
@@ -355,6 +365,8 @@ def run(
         return assess(project, day, now, s)
     root = root_for(project, capital)
     with single_writer(root_for(project)):
+        if capital not in active_capitals(project):
+            return {"state": "retired", "mode": MODE}
         if not enabled(project) or stopped(project):
             return {"state": "stopped", "mode": MODE}
         s = book.load(root, capital)
@@ -418,6 +430,8 @@ def recover_morning(project, signal_date, *, now=None, capital=3_000_000, anchor
     def stamp():
         return now + timedelta(seconds=monotonic() - started)
 
+    if capital not in active_capitals(project):
+        return {"state": "retired", "mode": MODE}
     day = pd.Timestamp(signal_date)
     daystr = iso(day)
     bound = anchor or project / "data/plan-forward/accounts/B/baseline.json"
@@ -430,6 +444,8 @@ def recover_morning(project, signal_date, *, now=None, capital=3_000_000, anchor
         return dict(state="disabled", date=daystr)
     root = root_for(project, capital)
     with single_writer(root_for(project)):
+        if capital not in active_capitals(project):
+            return {"state": "retired", "mode": MODE}
         if not enabled(project):
             return dict(state="disabled", date=daystr)
         if anchor["native_revision_sha256"] != book.revision_digest(
@@ -590,7 +606,7 @@ def after_daily(project, date):
 def status(project, now=None, capital=None):
     now = now or datetime.now(JST)
     if capital is None:
-        accounts = {str(value): status(project, now, value) for value in A0_5_PAPER_CAPITALS}
+        accounts = {str(value): status(project, now, value) for value in active_capitals(project)}
         return dict(
             strategy=NAME,
             mode=MODE,
@@ -598,6 +614,8 @@ def status(project, now=None, capital=None):
             stopped=stopped(project),
             accounts=accounts,
         )
+    if capital not in active_capitals(project):
+        return {"state": "retired", "enabled": False, "mode": MODE}
     s = book.load(root_for(project, capital), capital)
     active = enabled(project)
     stop = stopped(project)

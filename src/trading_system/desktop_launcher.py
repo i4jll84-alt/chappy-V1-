@@ -479,7 +479,7 @@ class Launcher:
 
         ttk.Checkbutton(
             strategy,
-            text=f"Bプラン / {a0_5.NAME}",
+            text=f"独立ペーパー口座 / {a0_5.NAME}",
             variable=self.a0_selected,
             command=toggle_strategy,
         ).pack(side="left")

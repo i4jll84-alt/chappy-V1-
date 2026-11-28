@@ -11,17 +11,17 @@
     },
     {
       "id": "B",
-      "name": "A0-5（運用ガード付き）",
+      "name": "V21 寄付指値・2ATR追随逆指値",
       "stage": "active",
-      "adapter": "plan_b_forward",
-      "version": "a0-5-guarded-v1",
-      "start": "2026-11-19",
+      "adapter": "plan_b_v21",
+      "version": "v21-opening-limit-atr-v1",
+      "start": "2026-11-27",
       "capital": 3000000
     },
     {
       "id": "C",
       "name": "好決算ドリフト・3日初押し（4ATR・60立会日）",
-      "stage": "active",
+      "stage": "retired",
       "adapter": "plan_c_pead_forward",
       "version": "pead-dip3-atr4-h60-v1",
       "start": "2026-11-25",

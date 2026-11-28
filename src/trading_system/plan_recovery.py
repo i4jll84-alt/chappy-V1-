@@ -530,7 +530,7 @@ def recover_supplemental(project, target, *, now=None):
                     handled = report["steps"].get("native_evening", {}).get("capital")
                     accounts = {
                         cap: native_account(project, target, tick, cap)
-                        for cap in a0_5.A0_5_PAPER_CAPITALS
+                        for cap in a0_5.active_capitals(project)
                         if cap != handled
                     }
                     reason = next((v for v in accounts.values() if v["status"] not in GOOD), None)
@@ -540,7 +540,7 @@ def recover_supplemental(project, target, *, now=None):
                         else "ready"
                     )
                     return dict(reason or result(state), accounts=accounts)
-                for cap in a0_5.A0_5_PAPER_CAPITALS:
+                for cap in a0_5.active_capitals(project):
                     state = a0_5.run(project, target, now=tick(), capital=cap)
                     if state["state"] != "reconciled":
                         return result(

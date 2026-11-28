@@ -301,6 +301,45 @@ def _a_account(reader, plan, asof, required):
     return state, closed, fees, marks
 
 
+def _v21_account(reader, plan, asof, required):
+    book = reader.project / "data/plan-forward/accounts/B"
+    current = reader.read(book / "initial.json")
+    if (
+        current["strategy"] != plan["version"]
+        or current["account"]["initial_capital"] != plan["capital"]
+        or current["account"]["last_mark"] != plan["start"]
+    ):
+        raise ReportInputError("V21 initial account changed")
+    paths = [p for p in sorted((book / "sessions").glob("*/close.json")) if p.parent.name <= asof]
+    if [p.parent.name for p in paths] != list(required):
+        raise ReportInputError("V21 missing or extra session close")
+    trades, fees = [], []
+    for path in paths:
+        day = path.parent.name
+        close, decision = reader.read(path), reader.read(path.with_name("decision.json"))
+        prev_hash = logical_hash(current)
+        if (
+            decision["target"] != day
+            or close["target"] != day
+            or decision["strategy"] != plan["version"]
+            or close["decision_sha256"] != logical_hash(decision)
+            or close["previous_sha256"] != prev_hash
+            or decision["previous_sha256"] != prev_hash
+        ):
+            raise ReportInputError("V21 frozen decision or account chain changed")
+        _verify_decision(
+            decision, day, allow_no_buy_late=not close["modeled_executions"], now=reader.now
+        )
+        _stop(reader, path, close)
+        trades.extend(close["trades"])
+        fees.extend(close["fees"])
+        current = close
+        if current["account"]["last_mark"] != day:
+            raise ReportInputError("V21 mark date mismatch")
+        same(current["account"]["realized"], sum(t["net"] for t in trades), "V21 realized mismatch")
+    return dict(current["account"], _v21_hash=logical_hash(current)), trades, fees, []
+
+
 def _b_account(reader, plan, asof, required):
     book = reader.project / "data/plan-forward/accounts/B"
     base = reader.read(book / "baseline.json")
@@ -588,14 +627,14 @@ def _next_stop(reader, plan, decision, target):
     project = reader.project
     book = project / "data/plan-forward/accounts" / plan["id"]
     switches = [book / "STOP"]
-    if plan["id"] == "B":
+    if plan["id"] == "B" and plan.get("adapter") != "plan_b_v21":
         switches += [project / "data/a0-5-paper/STOP", project / "data/swing-forward/STOP"]
     elif plan["id"] == "C":
         switches += [project / "data/plan-forward/STOP"]
     else:
         switches += [project / "data/swing-forward/STOP"]
     active = [reader.track(p).relative_to(project).as_posix() for p in switches if p.exists()]
-    if plan["id"] == "B":
+    if plan["id"] == "B" and plan.get("adapter") != "plan_b_v21":
         native = project / "data/a0-5-paper"
         for stop_path in (
             native / "accounts" / str(plan["capital"]) / "stops" / (target + ".json"),
@@ -634,7 +673,7 @@ def _next_stop(reader, plan, decision, target):
 
 
 def _planned(reader, plan, state, next_day, master):
-    if plan["id"] == "B":
+    if plan["id"] == "B" and plan.get("adapter") != "plan_b_v21":
         decision = state["next_decision"]
         if decision.get("order_date") != next_day or decision.get("state") != "ready":
             raise ReportInputError("B next frozen plan missing")
@@ -662,6 +701,11 @@ def _planned(reader, plan, state, next_day, master):
             raise ReportInputError("next frozen decision missing or incomplete")
         if plan["id"] == "C" and decision["starting_account_sha256"] != state.get("_native_hash"):
             raise ReportInputError("C next decision chain changed")
+        if (
+            plan.get("adapter") == "plan_b_v21"
+            and decision["previous_sha256"] != state["_v21_hash"]
+        ):
+            raise ReportInputError("V21 next decision chain changed")
         picks = decision.get("picks", [])
         reason = (
             decision.get("no_buy_reason")
@@ -732,7 +776,9 @@ def build_report_packet(project, asof, *, now=None):
     reader = _Reader(project, now)
     registry = reader.read(reader.project / "config/forward-plans.json")["plans"]
     active = {p["id"]: p for p in registry if p["stage"] == "active"}
-    if set(active) != set(ACTIVE_IDS):
+    v21 = active.get("B", {}).get("adapter") == "plan_b_v21"
+    ids = ("A", "B", "A9", "A10") if v21 else ACTIVE_IDS
+    if set(active) != set(ids):
         raise ReportInputError("active plan registry changed; review report mapping")
     start = min(p["start"] for p in active.values())
     sessions, next_day = _calendar(reader, start, asof, now)
@@ -743,6 +789,7 @@ def build_report_packet(project, asof, *, now=None):
     prices = {c: rows[-1] for c, rows in cols.items()}
     packet = dict(
         schema_version=1,
+        active_plan_ids=list(ids),
         asof=asof,
         generated_at=now.isoformat(),
         next_session=next_day,
@@ -764,7 +811,7 @@ def build_report_packet(project, asof, *, now=None):
             paper_only=True,
         ),
     )
-    for key in ACTIVE_IDS:
+    for key in ids:
         plan = active[key]
         row = dict(registry=deepcopy(plan), **deepcopy(plan), status="unavailable", issues=[])
         packet["plans"][key] = row
@@ -773,6 +820,8 @@ def build_report_packet(project, asof, *, now=None):
                 raise ReportInputError("account baseline close missing")
             required = [d for d in days if d > plan["start"]]
             loader = _b_account if key == "B" else _c_account if key == "C" else _a_account
+            if key == "B" and v21:
+                loader = _v21_account
             state, closed, fees, _ = loader(reader, plan, asof, required)
             if key == "C":
                 close = reader.read(

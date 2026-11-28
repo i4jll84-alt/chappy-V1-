@@ -70,7 +70,7 @@ def saved_prices(project, now):
 
 
 def positions(project, key, plan):
-    if key == "C":
+    if key == "C" or plan.get("adapter") == "plan_b_v21":
         return [
             dict(
                 plan=key,

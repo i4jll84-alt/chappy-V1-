@@ -35,6 +35,15 @@ from reportlab.platypus import (
 )
 
 PLAN_ORDER = ("A", "B", "C", "A9", "A10")
+
+
+def plan_order(packet):
+    ids = tuple(packet.get("active_plan_ids", PLAN_ORDER))
+    if ids not in (PLAN_ORDER, ("A", "B", "A9", "A10")):
+        raise ValueError("invalid report plan order")
+    return ids
+
+
 PAGE_SIZE = landscape(A4)
 MARGIN = 32
 CONTENT_WIDTH = PAGE_SIZE[0] - 2 * MARGIN
@@ -483,7 +492,7 @@ def overview(packet: dict, period: str) -> list:
         )
         term += "  |  " + caption
     story += [p(term, "subtitle"), Spacer(1, 5)]
-    story += [p("全5プランの現在地", "section"), Spacer(1, 5)]
+    story += [p("稼働プランの現在地", "section"), Spacer(1, 5)]
     rows = [
         [
             p(h, "head")
@@ -496,7 +505,7 @@ def overview(packet: dict, period: str) -> list:
             )
         ]
     ]
-    for key in PLAN_ORDER:
+    for key in plan_order(packet):
         plan = packet.get("plans", {}).get(key, {})
         inception = metrics(plan, "inception")
         meta = plan_meta(plan)
@@ -542,7 +551,7 @@ def overview(packet: dict, period: str) -> list:
                 )
             ]
         ]
-        for key in PLAN_ORDER:
+        for key in plan_order(packet):
             metric = metrics(packet.get("plans", {}).get(key, {}), metric_period)
             count = first(
                 metric,
@@ -882,7 +891,7 @@ def render_report(packet: dict, period: str, output: Path) -> dict:
     chart_dir.mkdir(parents=True, exist_ok=True)
     chart_paths = []
     story = overview(packet, period)
-    for key in PLAN_ORDER:
+    for key in plan_order(packet):
         plan = packet.get("plans", {}).get(key, {})
         chart = make_chart(key, plan, metrics(plan, "inception"), CONTENT_WIDTH, 150)
         chart_path = chart_dir / f"{period}_{key}.svg"
@@ -933,9 +942,9 @@ def render_packet(packet: dict, output: Path) -> dict:
     register_fonts()
     STYLES.update(styles())
     date.fromisoformat(packet["asof"])
-    missing = [key for key in PLAN_ORDER if key not in packet.get("plans", {})]
+    missing = [key for key in plan_order(packet) if key not in packet.get("plans", {})]
     if missing:
-        raise ValueError("対象5プランの入力が不足しています: " + ", ".join(missing))
+        raise ValueError("対象プランの入力が不足しています: " + ", ".join(missing))
     output.mkdir(parents=True, exist_ok=True)
     reports = {period: render_report(packet, period, output) for period in PERIOD_LABELS}
     return {"asof": packet["asof"], "reports": reports}

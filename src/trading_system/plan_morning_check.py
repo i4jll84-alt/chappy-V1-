@@ -49,7 +49,7 @@ def apply_state(item, state, reason):
 
 
 def official(project, key, signal, target, spec):
-    if key in ("A", "A9", "A10", "C"):
+    if key in ("A", "A9", "A10", "C") or spec.get("adapter") == "plan_b_v21":
         path = project / "data/plan-forward/accounts" / key / "sessions" / target / "decision.json"
         return read(path) if path.is_file() else None
     capital = spec["capital"]
@@ -162,12 +162,14 @@ def assess_plan(project, key, spec, signal, target, start, deadline, checked):
         return apply_state(item, "outside", "比較対象の開始前または非稼働")
     try:
         doc = official(project, key, signal, target, spec)
-        family = "A" if key in ("A9", "A10") else key
+        family = "A" if key in ("A9", "A10") or spec.get("adapter") == "plan_b_v21" else key
         if doc is None:
             return apply_state(
                 item, "pending" if checked < deadline else "missed", "対象日の確定記録なし"
             )
-        if key in ("A9", "A10") and doc.get("strategy") != spec["version"]:
+        if (key in ("A9", "A10") or spec.get("adapter") == "plan_b_v21") and doc.get(
+            "strategy"
+        ) != spec["version"]:
             return apply_state(item, "unverified", "口座と保存判定のルール版が一致しない")
         pead = key == "C" and spec.get("adapter") == "plan_c_pead_forward"
         if pead and (
@@ -199,7 +201,7 @@ def assess_plan(project, key, spec, signal, target, start, deadline, checked):
         picks = doc["picks" if pead else {"A": "picks", "B": "candidates", "C": "ranked"}[family]]
         item["candidate_count"] = len(doc.get("ranked", picks) if pead else picks)
         if key == "B":
-            item["order_count"] = len(doc["orders"])
+            item["order_count"] = len(picks) if family == "A" else len(doc["orders"])
         elif key == "C":
             item["order_count"] = len(doc["plan"]["buys"])
         timed = timestamp(doc.get("recorded_at"))
@@ -308,7 +310,10 @@ def record_startup(project, report, *, now=None):
             or not (project / "data/a0-5-paper/enabled").is_file()
         ),
     }
-    for key in ("A", "A9", "A10"):
+    tracked = ["A", "A9", "A10"]
+    if specs.get("B", {}).get("adapter") == "plan_b_v21":
+        tracked.append("B")
+    for key in tracked:
         account = project / "data/plan-forward/accounts" / key
         switches[key] = (account / "STOP").exists() or (
             account / "sessions" / target / "preopen_stop.json"
