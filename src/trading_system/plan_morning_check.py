@@ -227,6 +227,8 @@ def assess_plan(project, key, spec, signal, target, start, deadline, checked):
             return apply_state(item, "missed", "確定完了が09:00以降")
         if key == "C" and state == "insufficient_data":
             return apply_state(item, "guarded", "資料不足による判定不可。既存建玉の出口は継続")
+        if spec.get("adapter") == "plan_b_v21" and state == "exits_only":
+            return apply_state(item, "guarded", "日証金の確認期限を過ぎたため新規買付を停止")
         if pead and not doc["allow_entries"]:
             if item["order_count"]:
                 return apply_state(item, "unverified", "新規停止の判定に買付予定が含まれています")

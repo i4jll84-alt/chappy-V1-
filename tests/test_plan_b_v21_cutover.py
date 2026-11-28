@@ -1,5 +1,7 @@
+import csv
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -102,3 +104,67 @@ def test_unverified_split_requires_review_before_modeled_execution(monkeypatch, 
     bars = {"12340": {"AdjFactor": 0.5, "O": 100}}
     with pytest.raises(ValueError, match="corporate_action"):
         plan_b_v21.simulate(Path(), tmp_path, decision, 3000000, bars, {}, False)
+
+
+def test_intraday_stops_follow_all_opening_fills(monkeypatch, tmp_path):
+    class Runner:
+        cfg = SimpleNamespace(atr_mult=2, state_path=tmp_path / "state.json")
+
+        def sync_after_open(self, day, path):
+            with path.open(encoding="utf8") as handle:
+                fills = list(csv.DictReader(handle))
+            assert [x["side"] for x in fills] == ["BUY", "BUY", "SELL", "SELL"]
+            assert [x["seq"] for x in fills] == ["1", "2", "3", "4"]
+            assert [x["exec_time"] for x in fills] == sorted(x["exec_time"] for x in fills)
+            ledger = []
+            balance = 100000.0
+            for x in fills:
+                price = float(x["price"])
+                item = dict(
+                    exec_id=x["exec_id"], side=x["side"], shares=100, price=price, code5=x["code"]
+                )
+                if x["side"] == "BUY":
+                    balance -= 100 * price
+                else:
+                    item.update(allocated_cost=10000, realized_pnl=100 * price - 10000)
+                    balance += 100 * price
+                ledger.append(item)
+            write(
+                self.cfg.state_path,
+                dict(cash=balance, cash_audit_hold=False, positions=[], trade_ledger=ledger),
+            )
+
+        def cancel_pending_orders(self, *args, **kwargs):
+            pass
+
+        def _calc_fee(self, value):
+            return 0
+
+    monkeypatch.setattr(plan_b_v21.runtime, "native_runner", lambda *args: Runner())
+    codes = ["11110", "22220"]
+    day = "2026-11-30"
+    state = dict(
+        positions=[],
+        pending_orders=[dict(code5=c, selection_atr14=2, target_trade_date=day) for c in codes],
+    )
+    orders = [
+        {
+            "区分": "買い#1(指値・寄付)",
+            "注文ID": c,
+            "コード5桁": c,
+            "株数": "100",
+            "指値または逆指値": "100",
+        }
+        for c in codes
+    ]
+    bars = {c: dict(AdjFactor=1, O=100, L=50, C=99) for c in codes}
+    result = plan_b_v21.simulate(
+        Path(),
+        tmp_path,
+        dict(target=day, native=state, orders=orders),
+        100000,
+        bars,
+        {"account": {"realized": 0}},
+        False,
+    )
+    assert len(result["trades"]) == 2 and not result["account"]["positions"]
